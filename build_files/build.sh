@@ -18,12 +18,11 @@ dnf5 install -y tmux
 # COSMIC packages
 dnf5 install -y fedora-release-cosmic cosmic-config-fedora
 
-# Use a COPR Example:
-#
-# dnf5 -y copr enable ublue-os/staging
-# dnf5 -y install package
-# Disable COPRs so they don't end up enabled on the final image:
-# dnf5 -y copr disable ublue-os/staging
+# add lemonade via copr:
+dnf5 -y copr enable abn/lemonade
+dnf5 -y install lemonade
+# disable lemonade copr so it is not enabled on the image
+dnf5 -y copr disable abn/lemonade
 
 #### Example for enabling a System Unit File
 
