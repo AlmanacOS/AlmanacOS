@@ -25,5 +25,6 @@ dnf5 -y install lemonade
 dnf5 -y copr disable abn/lemonade
 
 #### Example for enabling a System Unit File
-
 systemctl enable podman.socket
+
+systemctl enable lemonade
