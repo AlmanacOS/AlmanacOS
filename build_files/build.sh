@@ -16,7 +16,7 @@ cp -avf "/ctx/system_files"/. /
 dnf5 install -y tmux
 
 # COSMIC packages
-dnf5 install -y fedora-release-cosmic
+dnf5 install -y fedora-release-cosmic cosmic-config-fedora
 
 # Use a COPR Example:
 #
