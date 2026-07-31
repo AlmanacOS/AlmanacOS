@@ -15,6 +15,9 @@ cp -avf "/ctx/system_files"/. /
 # this installs a package from fedora repos
 dnf5 install -y tmux
 
+# COSMIC packages
+dnf5 install -y fedora-release-cosmic
+
 # Use a COPR Example:
 #
 # dnf5 -y copr enable ublue-os/staging
