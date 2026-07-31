@@ -28,3 +28,6 @@ dnf5 -y copr disable abn/lemonade
 systemctl enable podman.socket
 
 systemctl enable lemonade
+
+# Make sure just scripts are executable
+chmod +x /usr/libexec/almanac-memory

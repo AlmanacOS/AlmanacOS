@@ -1,0 +1,255 @@
+#!/usr/bin/bash
+# almanac-memory — inspect and tune TTM's system-memory cap.
+#
+# ttm.pages_limit is a GLOBAL cap on how many pages of system RAM the TTM
+# subsystem will hand out for GPU-side buffers, across every driver that uses
+# TTM. The kernel default (~50% of RAM) is a guard rail, and it is the correct
+# value on nearly all hardware. Raising it is only appropriate on unified-memory
+# APUs, where the iGPU is the primary compute device and system RAM *is* VRAM.
+#
+# On a system with a discrete GPU, raising it removes the guard rail: GTT is the
+# spill path for VRAM evictions and staging, TTM-backed pages are largely
+# unreclaimable, and the OOM killer has very little to work with by the time it
+# fires. This script refuses to touch those systems on purpose.
+
+set -euo pipefail
+
+readonly PAGE_SIZE=4096
+readonly GIB=1073741824
+
+# An AMD GPU reporting this much dedicated VRAM is treated as discrete. APU
+# carve-outs are conventionally 512M-4G. Note we can't use bus position to tell
+# these apart the way we can on Intel: AMD APU iGPUs show up on high bus numbers
+# (e.g. 0000:c6:00.0), not on bus 00.
+readonly DISCRETE_VRAM_THRESHOLD_GIB=8
+
+readonly DEFAULT_PERCENT=75
+
+INTEGRATED=()
+DISCRETE=()
+FOREIGN=()
+
+die() { printf 'almanac-memory: %s\n' "$*" >&2; exit 1; }
+
+priv() {
+    if [[ $EUID -eq 0 ]]; then
+        "$@"
+    elif command -v run0 >/dev/null 2>&1; then
+        run0 "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    else
+        die "need root, and neither run0 nor sudo is available"
+    fi
+}
+
+human_gib() { awk -v b="$1" 'BEGIN { printf "%.1f GiB", b / 1073741824 }'; }
+
+mem_total_bytes() { awk '/^MemTotal:/ { print $2 * 1024 }' /proc/meminfo; }
+
+gpu_name() {
+    local bdf="$1" name=""
+    if command -v lspci >/dev/null 2>&1; then
+        name=$(lspci -mm -s "$bdf" 2>/dev/null | awk -F'"' '{ print $6 }') || true
+    fi
+    if [[ -z "$name" ]]; then
+        name="$(<"/sys/bus/pci/devices/$bdf/vendor"):$(<"/sys/bus/pci/devices/$bdf/device")"
+    fi
+    printf '%s' "$name"
+}
+
+scan_gpus() {
+    local dev class bdf vendor vram
+
+    for dev in /sys/bus/pci/devices/*; do
+        [[ -r "$dev/class" ]] || continue
+        class=$(<"$dev/class")
+
+        # 0x0300xx = VGA controller, 0x0302xx = 3D controller
+        case "$class" in
+            0x0300*|0x0302*) ;;
+            *) continue ;;
+        esac
+
+        bdf=${dev##*/}
+        vendor=$(<"$dev/vendor")
+
+        case "$vendor" in
+            0x1002)
+                # amdgpu exposes these directly on the PCI device node.
+                if [[ -r "$dev/mem_info_vram_total" ]]; then
+                    vram=$(<"$dev/mem_info_vram_total")
+                else
+                    vram=0
+                fi
+                if (( vram >= DISCRETE_VRAM_THRESHOLD_GIB * GIB )); then
+                    DISCRETE+=("$bdf|$vram|$(gpu_name "$bdf")")
+                else
+                    INTEGRATED+=("$bdf|$vram|$(gpu_name "$bdf")")
+                fi
+                ;;
+            0x8086)
+                # Intel integrated display sits on bus 00 and is irrelevant here.
+                # Anything else from Intel (Arc) is a discrete card.
+                [[ "$bdf" == 0000:00:* ]] && continue
+                FOREIGN+=("$bdf|0|$(gpu_name "$bdf")")
+                ;;
+            *)
+                FOREIGN+=("$bdf|0|$(gpu_name "$bdf")")
+                ;;
+        esac
+    done
+}
+
+current_pages_limit() {
+    if [[ -r /sys/module/ttm/parameters/pages_limit ]]; then
+        cat /sys/module/ttm/parameters/pages_limit
+    else
+        printf 'unknown'
+    fi
+}
+
+current_karg() {
+    rpm-ostree kargs 2>/dev/null | tr ' ' '\n' | grep -m1 '^ttm\.pages_limit=' || true
+}
+
+require_ostree() {
+    [[ -f /run/ostree-booted ]] || die "not an ostree/bootc system; set ttm.pages_limit through your own bootloader config"
+    command -v rpm-ostree >/dev/null 2>&1 || die "rpm-ostree not found"
+}
+
+report() {
+    local total entry bdf vram name limit
+
+    total=$(mem_total_bytes)
+    limit=$(current_pages_limit)
+
+    printf 'System memory:      %s\n' "$(human_gib "$total")"
+    if [[ "$limit" == "unknown" ]]; then
+        printf 'TTM pages_limit:    unknown (ttm module not loaded)\n'
+    else
+        printf 'TTM pages_limit:    %s pages (%s)\n' "$limit" "$(human_gib $(( limit * PAGE_SIZE )))"
+    fi
+    printf '\n'
+
+    for entry in "${INTEGRATED[@]:-}"; do
+        [[ -n "$entry" ]] || continue
+        IFS='|' read -r bdf vram name <<<"$entry"
+        printf 'integrated  %s  %-40s  carve-out %s\n' "$bdf" "$name" "$(human_gib "$vram")"
+    done
+    for entry in "${DISCRETE[@]:-}"; do
+        [[ -n "$entry" ]] || continue
+        IFS='|' read -r bdf vram name <<<"$entry"
+        printf 'discrete    %s  %-40s  VRAM %s\n' "$bdf" "$name" "$(human_gib "$vram")"
+    done
+    for entry in "${FOREIGN[@]:-}"; do
+        [[ -n "$entry" ]] || continue
+        IFS='|' read -r bdf vram name <<<"$entry"
+        printf 'discrete    %s  %-40s  (non-AMD)\n' "$bdf" "$name"
+    done
+}
+
+check_eligible() {
+    if (( ${#DISCRETE[@]} > 0 || ${#FOREIGN[@]} > 0 )); then
+        printf '\n' >&2
+        printf 'Refusing to raise the TTM cap: this system has a discrete GPU.\n' >&2
+        printf '\n' >&2
+        printf 'The kernel default is correct here. GTT is the spill path for VRAM\n' >&2
+        printf 'evictions on a discrete card, and removing the cap trades a clean\n' >&2
+        printf 'allocation failure for an OOM the kernel can barely recover from.\n' >&2
+        printf '\n' >&2
+        printf 'If this IS a unified-memory APU that was misdetected, it is reporting\n' >&2
+        printf '>= %d GiB of dedicated VRAM, which means a large BIOS carve-out.\n' "$DISCRETE_VRAM_THRESHOLD_GIB" >&2
+        printf 'Lower the carve-out in firmware and let GTT do the work instead.\n' >&2
+        exit 1
+    fi
+
+    if (( ${#INTEGRATED[@]} == 0 )); then
+        die "no integrated AMD GPU found; nothing to tune"
+    fi
+}
+
+cmd_show() {
+    scan_gpus
+    report
+}
+
+cmd_tune() {
+    local percent="${1:-$DEFAULT_PERCENT}"
+    local total target pages limit reply args=()
+
+    [[ "$percent" =~ ^[0-9]+$ ]] || die "percent must be an integer, got '$percent'"
+    (( percent >= 10 && percent <= 95 )) || die "percent must be between 10 and 95"
+
+    require_ostree
+    scan_gpus
+    report
+    check_eligible
+
+    total=$(mem_total_bytes)
+    target=$(( total * percent / 100 ))
+    pages=$(( target / PAGE_SIZE ))
+    limit=$(current_pages_limit)
+
+    printf '\n'
+    printf 'Proposed:           %s pages (%s, %s%% of RAM)\n' "$pages" "$(human_gib "$target")" "$percent"
+    printf 'Kernel argument:    ttm.pages_limit=%s\n' "$pages"
+    printf '\n'
+    printf 'This is a cap, not a reservation. Above it, GPU allocations fail;\n'
+    printf 'the remaining %s%% is what the host keeps for itself.\n' "$(( 100 - percent ))"
+    printf '\n'
+
+    if [[ "${ALMANAC_ASSUME_YES:-}" != "1" ]]; then
+        read -r -p 'Apply and stage a new deployment? [y/N] ' reply
+        [[ "$reply" =~ ^[Yy]$ ]] || { printf 'Aborted.\n'; exit 0; }
+    fi
+
+    # Delete and append in one invocation so this costs a single deployment.
+    local existing
+    existing=$(current_karg)
+    [[ -n "$existing" ]] && args+=("--delete=$existing")
+    args+=("--append=ttm.pages_limit=$pages")
+
+    priv rpm-ostree kargs "${args[@]}"
+
+    printf '\nStaged. Reboot to apply.\n'
+}
+
+cmd_reset() {
+    local existing
+
+    require_ostree
+    existing=$(current_karg)
+
+    if [[ -z "$existing" ]]; then
+        printf 'No ttm.pages_limit kernel argument is set; already on the kernel default.\n'
+        exit 0
+    fi
+
+    priv rpm-ostree kargs --delete="$existing"
+    printf 'Removed %s. Reboot to return to the kernel default.\n' "$existing"
+}
+
+usage() {
+    cat <<'EOF'
+Usage: almanac-memory <command> [args]
+
+  show            Report GPU topology and the current TTM system-memory cap
+  tune [percent]  Propose and apply a cap (default 75% of RAM, APUs only)
+  reset           Remove the ttm.pages_limit karg, back to the kernel default
+
+Set ALMANAC_ASSUME_YES=1 to skip the confirmation prompt.
+EOF
+}
+
+main() {
+    case "${1:-}" in
+        show)  shift; cmd_show "$@" ;;
+        tune)  shift; cmd_tune "$@" ;;
+        reset) shift; cmd_reset "$@" ;;
+        ''|-h|--help) usage ;;
+        *) usage; exit 1 ;;
+    esac
+}
+
+main "$@"
