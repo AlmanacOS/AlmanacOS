@@ -27,7 +27,7 @@ dnf5 -y copr disable abn/lemonade
 #### Example for enabling a System Unit File
 systemctl enable podman.socket
 
-systemctl enable lemonade
+systemctl enable lemonade-server
 
 # Make sure just scripts are executable
 chmod +x /usr/libexec/almanac-memory
