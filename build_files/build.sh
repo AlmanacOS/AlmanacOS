@@ -28,3 +28,4 @@ systemctl enable lemond
 
 # Make sure just scripts are executable
 chmod +x /usr/libexec/almanac-memory
+chmod +x /usr/libexec/almanac-models

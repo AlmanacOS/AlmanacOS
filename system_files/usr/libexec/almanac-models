@@ -1,0 +1,432 @@
+#!/usr/bin/bash
+# almanac-models — verify and import model bundles carried in on a USB drive.
+#
+# Bundles are produced on a networked machine by almanac-model-fetch (`amf`),
+# which downloads a model, verifies every byte against upstream's published
+# hashes, captures the signed git evidence, and signs the result. This script is
+# the airgapped side: it re-checks all of that offline and, only if it holds,
+# installs the model files where Lemonade can find them.
+#
+# The verification `amf` performs, strongest first:
+#   1. every model file hashes to what the manifest says;
+#   2. the manifest's own digest matches the file list;
+#   3. every evidence file hashes to what the manifest says;
+#   4. the git chain is re-derived offline: commit -> trees -> LFS pointers;
+#   5. the fetcher's minisign signature over the manifest.
+#
+# Only (5) says who produced the bundle, so import gates on it: without a
+# trusted public key the other four checks prove a bundle is internally
+# consistent, which is exactly what a well-made forgery also is.
+#
+# Import copies into a staging directory and verifies *that* copy, rather than
+# verifying on the drive and copying afterwards. It costs nothing extra — one
+# read of the drive either way — and it means the bytes that were checked are
+# the bytes that get installed, with no window between the two.
+
+set -euo pipefail
+
+readonly BUNDLES_SUBPATH="almanac/models"
+readonly MANIFEST_FILE="manifest.json"
+
+# Where imported models land. Lemonade is pointed here by the defaults we ship
+# in /usr/share/almanac/lemonade-defaults.json, and scans it recursively for
+# .gguf files, listing what it finds under the `extra.` namespace.
+MODELS_DIR="${ALMANAC_MODELS_DIR:-/var/lib/almanac/models}"
+
+# The fetcher's public key, carried here out of band — not off the drive being
+# verified, which would be circular.
+PUBKEY="${ALMANAC_AMF_PUBKEY:-/etc/almanac/amf.pub}"
+
+# Directories udisks/KDE mount removable media under, plus the conventional
+# manual mount points.
+readonly SEARCH_GLOBS=(/run/media/*/* /media/*/* /mnt/*)
+
+die() { printf 'almanac-models: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'almanac-models: %s\n' "$*" >&2; }
+
+# Set to 0 when the destination already belongs to the caller — an operator who
+# pointed ALMANAC_MODELS_DIR at a directory they own should not be asked for a
+# password to write to it.
+NEED_PRIV=1
+
+priv() {
+    if [[ $EUID -eq 0 || "$NEED_PRIV" == "0" ]]; then
+        "$@"
+    elif command -v run0 >/dev/null 2>&1; then
+        run0 "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    else
+        die "need root, and neither run0 nor sudo is available"
+    fi
+}
+
+require_amf() {
+    command -v amf >/dev/null 2>&1 ||
+        die "amf is not installed; this image should carry almanac-model-fetch"
+}
+
+confirm() {
+    local prompt="$1" reply
+    [[ "${ALMANAC_ASSUME_YES:-}" == "1" ]] && return 0
+    read -r -p "$prompt [y/N] " reply
+    [[ "$reply" =~ ^[Yy]$ ]]
+}
+
+# Sizes come out of du/df in KiB.
+human_size() {
+    awk -v k="$1" 'BEGIN {
+        split("KiB MiB GiB TiB", u, " ")
+        i = 1
+        while (k >= 1024 && i < 4) { k /= 1024; i++ }
+        printf (k < 10 && i > 1) ? "%.1f %s" : "%.0f %s", k, u[i]
+    }'
+}
+
+# ---------------------------------------------------------------------------
+# Finding drives and bundles
+
+# Every mounted path that looks like it carries bundles.
+find_drives() {
+    local candidate
+    for candidate in "${SEARCH_GLOBS[@]}"; do
+        [[ -d "$candidate/$BUNDLES_SUBPATH" ]] && printf '%s\n' "$candidate"
+    done
+}
+
+# Resolve the operator's argument, or the absence of one, to a single drive.
+resolve_drive() {
+    local given="${1:-}" drives=()
+
+    if [[ -n "$given" ]]; then
+        [[ -e "$given" ]] || die "$given does not exist"
+        printf '%s\n' "$given"
+        return
+    fi
+
+    mapfile -t drives < <(find_drives)
+
+    case ${#drives[@]} in
+        1) printf '%s\n' "${drives[0]}" ;;
+        0)
+            printf 'No mounted drive carries %s/.\n' "$BUNDLES_SUBPATH" >&2
+            printf '\n' >&2
+            printf 'Plug in the drive and let the desktop mount it, or pass the path:\n' >&2
+            printf '    ujust almanac-import-models /path/to/drive\n' >&2
+            exit 1
+            ;;
+        *)
+            printf 'Several drives carry bundles; name the one you mean:\n\n' >&2
+            printf '    %s\n' "${drives[@]}" >&2
+            exit 1
+            ;;
+    esac
+}
+
+# Every bundle directory under a path. Accepts a drive root, the bundles
+# directory itself, or a single bundle.
+find_bundles() {
+    local root="$1" dir
+
+    if [[ -f "$root/$MANIFEST_FILE" ]]; then
+        printf '%s\n' "$root"
+        return
+    fi
+
+    [[ -d "$root/$BUNDLES_SUBPATH" ]] && root="$root/$BUNDLES_SUBPATH"
+
+    for dir in "$root"/*/; do
+        dir="${dir%/}"
+        [[ -f "$dir/$MANIFEST_FILE" ]] && printf '%s\n' "$dir"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Key material
+
+pubkey_args() {
+    if [[ -r "$PUBKEY" ]]; then
+        printf '%s\n%s\n' --public-key "$PUBKEY"
+    fi
+}
+
+explain_missing_key() {
+    printf '\n' >&2
+    printf 'No fetcher public key at %s.\n' "$PUBKEY" >&2
+    printf '\n' >&2
+    printf 'The bundle signature is the only check that says who produced a\n' >&2
+    printf 'bundle; the rest prove it is internally consistent, which a forgery\n' >&2
+    printf 'is too. Install the public half of the key the fetching machine\n' >&2
+    printf 'signs with — carried here yourself, not taken off this drive:\n' >&2
+    printf '\n' >&2
+    printf '    ujust almanac-trust-model-key /path/to/amf.pub\n' >&2
+    printf '\n' >&2
+}
+
+cmd_trust_key() {
+    local src="${1:-}"
+
+    [[ -n "$src" ]] || die "usage: almanac-models trust-key <path to amf.pub>"
+    [[ -r "$src" ]] || die "cannot read $src"
+
+    # A minisign public key is two lines: an untrusted comment and base64.
+    grep -q '^untrusted comment:' "$src" ||
+        die "$src does not look like a minisign public key"
+
+    printf 'Installing %s as the trusted fetcher key at %s.\n' "$src" "$PUBKEY"
+    printf '\n'
+    printf 'This key is what every future import is checked against. It is only\n'
+    printf 'worth anything if you carried it here yourself: a key copied off the\n'
+    printf 'same drive as the bundles vouches for nothing.\n'
+    printf '\n'
+
+    confirm 'Install it?' || { printf 'Aborted.\n'; exit 0; }
+
+    [[ -w "$(dirname "$PUBKEY")" ]] && NEED_PRIV=0
+    priv install -Dm 0644 "$src" "$PUBKEY"
+    printf 'Installed. Imports will now verify against it.\n'
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+
+cmd_list() {
+    local drive
+    require_amf
+    drive=$(resolve_drive "${1:-}")
+    amf list "$drive"
+}
+
+cmd_verify() {
+    local drive upstream="" args=()
+
+    require_amf
+
+    # `verify [drive] [upstream-key]`. The upstream key is optional and
+    # deliberately not picked up automatically: passing it fails any bundle
+    # whose host does not sign its commits at all, which is ModelScope's normal
+    # state rather than a fault.
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --upstream-key) upstream="${2:-}"; shift 2 ;;
+            *) args+=("$1"); shift ;;
+        esac
+    done
+    [[ -z "$upstream" ]] && upstream="${args[1]:-}"
+
+    drive=$(resolve_drive "${args[0]:-}")
+
+    local key_args=()
+    mapfile -t key_args < <(pubkey_args)
+    if (( ${#key_args[@]} == 0 )); then
+        warn "no key at $PUBKEY; the bundle signature will not be checked"
+    fi
+
+    if [[ -n "$upstream" ]]; then
+        [[ -r "$upstream" ]] || die "cannot read upstream key $upstream"
+        key_args+=(--upstream-key "$upstream")
+    fi
+
+    amf verify "$drive" ${key_args[@]+"${key_args[@]}"}
+}
+
+# The name Lemonade will list an imported bundle under. Single-file models take
+# their name from the file; shard sets and multimodal pairs take the folder's.
+predicted_model_name() {
+    local dest="$1" ggufs=()
+
+    mapfile -t ggufs < <(find "$dest" -maxdepth 1 -name '*.gguf' ! -name '*mmproj*' -printf '%f\n')
+
+    if (( ${#ggufs[@]} == 1 )); then
+        printf 'extra.%s' "${ggufs[0]%.gguf}"
+    else
+        printf 'extra.%s' "$(basename "$dest")"
+    fi
+}
+
+# Strip the content-addressed digest suffix `amf` puts on a bundle directory:
+# `<org>__<repo>__<variant>__<digest12>` -> `<org>__<repo>__<variant>`. Two
+# revisions of the same variant then collide, which is the point — that is a
+# replacement, and it should be reported rather than silently accumulated.
+destination_name() {
+    local bundle_name="$1"
+    printf '%s' "${bundle_name%__*}"
+}
+
+import_one() {
+    local bundle="$1" staging_root="$2"
+    local name dest staged size_k avail_k
+
+    name=$(basename "$bundle")
+    dest="$MODELS_DIR/$(destination_name "$name")"
+    staged="$staging_root/$name"
+
+    printf '\n%s\n' "$name"
+
+    # Already here, and from this exact bundle: nothing to do. The marker holds
+    # the source bundle's directory name, which carries its digest, so this is
+    # an identity check and not just a name match.
+    if [[ -f "$dest/.almanac-bundle" ]]; then
+        if [[ "$(<"$dest/.almanac-bundle")" == "$name" ]]; then
+            printf '  already imported at %s\n' "$dest"
+            return 0
+        fi
+        if [[ "${ALMANAC_FORCE:-}" != "1" ]]; then
+            printf '  %s already holds a different revision of this model (%s).\n' \
+                "$dest" "$(<"$dest/.almanac-bundle")" >&2
+            printf '  Set ALMANAC_FORCE=1 to replace it.\n' >&2
+            return 1
+        fi
+        printf '  replacing %s\n' "$(<"$dest/.almanac-bundle")"
+    fi
+
+    # Check the space before spending an hour copying, and keep a GiB in hand:
+    # filling the root filesystem of a bootc system is a much worse day than a
+    # model that did not import.
+    size_k=$(du -sk "$bundle" | cut -f1)
+    avail_k=$(df -Pk "$MODELS_DIR" | awk 'NR == 2 { print $4 }')
+    if [[ -n "$avail_k" ]] && (( size_k + 1048576 > avail_k )); then
+        printf '  needs %s, only %s free at %s — skipping\n' \
+            "$(human_size "$size_k")" "$(human_size "$avail_k")" "$MODELS_DIR" >&2
+        return 1
+    fi
+
+    printf '  copying %s\n' "$(human_size "$size_k")"
+    priv rm -rf "$staged"
+    priv cp -a "$bundle" "$staged"
+
+    local key_args=()
+    mapfile -t key_args < <(pubkey_args)
+
+    if ! amf verify "$staged" ${key_args[@]+"${key_args[@]}"}; then
+        priv rm -rf "$staged"
+        printf '  VERIFICATION FAILED — nothing was installed\n' >&2
+        return 1
+    fi
+
+    # Promote. The staging area is on the same filesystem as the destination, so
+    # the verified model directory is renamed into place rather than copied
+    # again, and the directory Lemonade scans never holds a half-written model.
+    #
+    # errexit does not apply inside a function called as a condition, so the
+    # steps are chained explicitly: a failure here must not fall through to
+    # reporting a successful import.
+    local dest_partial="$dest.partial"
+    priv rm -rf "$dest_partial" &&
+        priv mv "$staged/model" "$dest_partial" &&
+        priv cp "$staged/$MANIFEST_FILE" "$dest_partial/.almanac-manifest.json" &&
+        priv sh -c 'printf "%s\n" "$1" > "$2/.almanac-bundle"' _ "$name" "$dest_partial" &&
+        priv rm -rf "$dest" &&
+        priv mv "$dest_partial" "$dest" || {
+        printf '  could not install into %s\n' "$dest" >&2
+        priv rm -rf "$staged" "$dest_partial"
+        return 1
+    }
+
+    priv rm -rf "$staged"
+    priv chmod -R a+rX "$dest"
+    command -v restorecon >/dev/null 2>&1 && priv restorecon -RF "$dest" >/dev/null 2>&1
+
+    printf '  imported to %s\n' "$dest"
+    printf '  Lemonade will list it as %s\n' "$(predicted_model_name "$dest")"
+}
+
+cmd_import() {
+    local drive bundles=() staging_root failed=0 imported=0
+
+    require_amf
+    drive=$(resolve_drive "${1:-}")
+
+    if [[ ! -r "$PUBKEY" ]]; then
+        if [[ "${ALMANAC_ALLOW_UNSIGNED:-}" != "1" ]]; then
+            explain_missing_key
+            printf 'Refusing to import unverified bundles. Set\n' >&2
+            printf 'ALMANAC_ALLOW_UNSIGNED=1 to import on content hashes alone.\n' >&2
+            exit 1
+        fi
+        warn "ALMANAC_ALLOW_UNSIGNED=1 — importing without checking who signed these bundles"
+    fi
+
+    mapfile -t bundles < <(find_bundles "$drive")
+    (( ${#bundles[@]} > 0 )) || die "no bundles found at $drive"
+
+    local existing_root="$MODELS_DIR"
+    while [[ ! -e "$existing_root" && "$existing_root" != / ]]; do
+        existing_root=$(dirname "$existing_root")
+    done
+    [[ -w "$existing_root" ]] && NEED_PRIV=0
+
+    printf 'Importing %d bundle(s) from %s into %s\n' \
+        "${#bundles[@]}" "$drive" "$MODELS_DIR"
+
+    # tmpfiles.d creates these at boot; make sure of it anyway, since an import
+    # can be the first thing that happens on a freshly deployed image.
+    priv mkdir -p "$MODELS_DIR"
+    staging_root="$(dirname "$MODELS_DIR")/.staging"
+    priv mkdir -p "$staging_root"
+
+    local bundle
+    for bundle in "${bundles[@]}"; do
+        if import_one "$bundle" "$staging_root"; then
+            (( ++imported ))
+        else
+            (( ++failed ))
+        fi
+    done
+
+    priv rmdir "$staging_root" 2>/dev/null || true
+
+    printf '\n%d imported, %d failed or skipped.\n' "$imported" "$failed"
+
+    if (( imported > 0 )); then
+        printf '\n'
+        printf 'Lemonade picks these up on start-up. If they do not appear, its\n'
+        printf 'config.json predates this image and still has an empty\n'
+        printf 'extra_models_dir; point it here once with:\n'
+        printf '\n'
+        printf '    lemonade config set extra_models_dir=%s\n' "$MODELS_DIR"
+        printf '\n'
+        if confirm 'Restart lemond now so the new models are listed?'; then
+            priv systemctl try-restart lemond.service
+            printf 'Restarted.\n'
+        fi
+    fi
+
+    (( failed == 0 ))
+}
+
+usage() {
+    cat <<EOF
+Usage: almanac-models <command> [args]
+
+  list [drive]              Inventory the bundles on a drive
+  verify [drive] [upstream-key]
+                            Re-verify every bundle, offline, writing nothing.
+                            The upstream key is an armored PGP key for the
+                            host's commit signatures, if you hold one.
+  import [drive]            Verify, then install the models for Lemonade
+  trust-key <path>          Install the fetcher's public key at $PUBKEY
+
+With no drive, mounted removable media is searched for $BUNDLES_SUBPATH/.
+
+Environment:
+  ALMANAC_ASSUME_YES=1      Skip confirmation prompts
+  ALMANAC_ALLOW_UNSIGNED=1  Import without a trusted key (content hashes only)
+  ALMANAC_FORCE=1           Replace an already-imported revision of a model
+  ALMANAC_AMF_PUBKEY=PATH   Use a different trusted key
+  ALMANAC_MODELS_DIR=PATH   Import somewhere other than $MODELS_DIR
+EOF
+}
+
+main() {
+    case "${1:-}" in
+        list)      shift; cmd_list "$@" ;;
+        verify)    shift; cmd_verify "$@" ;;
+        import)    shift; cmd_import "$@" ;;
+        trust-key) shift; cmd_trust_key "$@" ;;
+        ''|-h|--help) usage ;;
+        *) usage; exit 1 ;;
+    esac
+}
+
+main "$@"
