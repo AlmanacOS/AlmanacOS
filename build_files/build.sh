@@ -21,6 +21,10 @@ dnf5 -y install lemonade
 # disable lemonade copr so it is not enabled on the image
 dnf5 -y copr disable abn/lemonade
 
+dnf5 -y copr enable clemperorpenguin/AlmanacOS
+dnf5 -y install amdgpu_top
+dnf5 -y copr disable clemperorpenguin/AlmanacOS
+
 #### Example for enabling a System Unit File
 systemctl enable podman.socket
 
