@@ -21,8 +21,9 @@ dnf5 -y install lemonade
 # disable lemonade copr so it is not enabled on the image
 dnf5 -y copr disable abn/lemonade
 
+# AlmanacOS RPMs via copr
 dnf5 -y copr enable clemperorpenguin/AlmanacOS
-dnf5 -y install amdgpu_top
+dnf5 -y install amdgpu_top almanac-model-fetch
 dnf5 -y copr disable clemperorpenguin/AlmanacOS
 
 #### Example for enabling a System Unit File
