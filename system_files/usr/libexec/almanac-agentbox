@@ -727,15 +727,25 @@ cmd_run() {
     require_jq
     check_preconditions
 
-    agent_exists "$agent" ||
-        die "unknown agent '$agent'; try: almanac-agentbox --list"
+    # `shell` is not an agent. It boots the same VM with the same mounts and
+    # runs bash instead, which is the only way to look around inside one of
+    # these — krun does not implement podman exec, so there is no attaching to a
+    # sandbox that is already running. Deliberately gets no credentials: a
+    # debugging shell has no business holding a token.
+    local is_shell=0 guest_cmd
+    if [[ "$agent" == "shell" ]]; then
+        is_shell=1
+        guest_cmd=/usr/bin/bash
+    else
+        agent_exists "$agent" ||
+            die "unknown agent '$agent'; try: almanac-agentbox --list"
 
-    [[ "$(agent_field "$agent" built)" == "true" ]] ||
-        die "'$agent' is in the registry but not built into the image; see agent_image/Containerfile"
+        [[ "$(agent_field "$agent" built)" == "true" ]] ||
+            die "'$agent' is in the registry but not built into the image; see agent_image/Containerfile"
 
-    local guest_cmd
-    guest_cmd=$(agent_field "$agent" command)
-    [[ -n "$guest_cmd" ]] || die "registry entry for '$agent' has no command"
+        guest_cmd=$(agent_field "$agent" command)
+        [[ -n "$guest_cmd" ]] || die "registry entry for '$agent' has no command"
+    fi
 
     local project_dir
     project_dir=$(pwd -P)
@@ -750,9 +760,11 @@ cmd_run() {
     fi
 
     # Sizing: explicit flag, then the agent's own figures, then the defaults.
-    [[ -n "$CPUS" ]] || CPUS=$(agent_field "$agent" cpus)
+    if (( ! is_shell )); then
+        [[ -n "$CPUS" ]] || CPUS=$(agent_field "$agent" cpus)
+        [[ -n "$RAM_MIB" ]] || RAM_MIB=$(agent_field "$agent" ram_mib)
+    fi
     [[ -n "$CPUS" ]] || CPUS=$DEFAULT_CPUS
-    [[ -n "$RAM_MIB" ]] || RAM_MIB=$(agent_field "$agent" ram_mib)
     [[ -n "$RAM_MIB" ]] || RAM_MIB=$DEFAULT_RAM_MIB
 
     ensure_image
@@ -763,16 +775,21 @@ cmd_run() {
     fi
 
     local token_flags=()
-    mapfile -t token_flags < <(forward_tokens "$agent")
+    if (( ! is_shell )); then
+        mapfile -t token_flags < <(forward_tokens "$agent")
+    fi
 
     local env_flags=()
     mapfile -t env_flags < <(forward_passthrough)
 
     setup_network
 
-    load_cred "$agent"
-    if (( ${#token_flags[@]} == 0 && ${#CRED_FLAGS[@]} == 0 )); then
-        warn "no credential for '$agent'; try \`ujust almanac-agent-login $agent\`"
+    CRED_FLAGS=()
+    if (( ! is_shell )); then
+        load_cred "$agent"
+        if (( ${#token_flags[@]} == 0 && ${#CRED_FLAGS[@]} == 0 )); then
+            warn "no credential for '$agent'; try \`ujust almanac-agent-login $agent\`"
+        fi
     fi
 
     setup_git_identity
@@ -847,6 +864,10 @@ Commands:
   status              Check the runtime, the guest image, and the agents
   update              Pull the latest signed guest image
   ps                  Show running sandboxes
+  shell [cmd...]      Boot a sandbox on this directory and run bash (or cmd).
+                      No credentials are passed. This is the only way to look
+                      inside a sandbox — there is no attaching to a running one.
+  selftest            Check the sandbox still works after an image update
   login <agent>       Store a credential for an agent
   logout <agent>      Forget the stored credential (does NOT revoke it)
   egress [action]     show | allow <host> | deny <host> | log | test <host>
@@ -920,6 +941,7 @@ main() {
             status) cmd_status; return ;;
             update) cmd_update; return ;;
             ps) cmd_ps; return ;;
+            selftest) shift; exec /usr/libexec/almanac-agent-selftest "$@" ;;
             login) shift; cmd_login "$@"; return ;;
             logout) shift; cmd_logout "$@"; return ;;
             egress) shift; cmd_egress "$@"; return ;;

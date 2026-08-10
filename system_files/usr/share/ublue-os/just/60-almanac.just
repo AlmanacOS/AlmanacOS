@@ -68,3 +68,8 @@ almanac-agent-logout agent:
 [group('Almanac')]
 almanac-agent-egress action="show" host="":
     @/usr/libexec/almanac-agentbox egress "{{ action }}" "{{ host }}"
+
+# Check the agent sandbox still works (run this after an image update)
+[group('Almanac')]
+almanac-agent-selftest quick="":
+    @/usr/libexec/almanac-agent-selftest "{{ quick }}"

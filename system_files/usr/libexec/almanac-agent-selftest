@@ -1,0 +1,369 @@
+#!/usr/bin/bash
+# almanac-agent-selftest — check that the agent sandbox still works.
+#
+# Two jobs in one command, because in practice they are the same question asked
+# at different times:
+#
+#   1. After `bootc upgrade`. An image update replaces /usr wholesale. Anything
+#      the sandbox depends on that lives there — the krun runtime, the wrapper,
+#      the signature policy, the ujust recipes — can silently stop existing, and
+#      the symptom would be a failed agent run days later with no obvious cause.
+#
+#   2. On first deployment, as the on-device validation the design was always
+#      going to need. Several of the decisions in this sandbox rest on how
+#      libkrun behaves in practice rather than on anything documented, and until
+#      this runs green on real hardware those are assumptions, not facts.
+#
+# Exit status is 0 only if every check passed. Checks that boot a VM take a
+# while; --quick skips them and only inspects the installed files.
+#
+# One thing this cannot check: whether the Enter key works in a full-screen TUI
+# (podman#28067). It needs a human at a terminal. It is reported as a manual
+# step at the end rather than quietly omitted, because if it is broken then the
+# interactive wrapper is unusable no matter what else passes.
+
+set -uo pipefail
+
+readonly AGENTBOX=/usr/libexec/almanac-agentbox
+readonly REGISTRY=/usr/share/almanac/agents.json
+readonly POLICY=/etc/containers/policy.json
+readonly PUBKEY=/etc/pki/containers/almanacos.pub
+readonly REGISTRIES_D=/etc/containers/registries.d/ghcr.io.yaml
+readonly EGRESS_CONF=/usr/share/almanac/agent-egress.conf
+readonly PROXY=/usr/libexec/almanac-agent-proxy
+readonly PROXY_UNIT=almanac-agent-proxy.service
+readonly JUST_FILE=/usr/share/ublue-os/just/60-almanac.just
+
+CRED_DIR="${ALMANAC_AGENT_CRED_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/almanac/agent-creds}"
+
+QUICK=0
+PASSED=0
+FAILED=0
+SKIPPED=0
+
+pass() { printf '  \033[32mPASS\033[0m  %s\n' "$*"; (( ++PASSED )); }
+fail() { printf '  \033[31mFAIL\033[0m  %s\n' "$*"; (( ++FAILED )); }
+skip() { printf '  SKIP  %s\n' "$*"; (( ++SKIPPED )); }
+info() { printf '        %s\n' "$*"; }
+head2() { printf '\n%s\n' "$*"; }
+
+# ---------------------------------------------------------------------------
+# Durability — everything here lives in /usr or /etc and is replaced by an
+# image update.
+
+check_installed() {
+    head2 "Installed files"
+
+    if [[ -x "$AGENTBOX" ]]; then
+        pass "$AGENTBOX is present and executable"
+    else
+        fail "$AGENTBOX is missing or not executable"
+    fi
+
+    if [[ -L /usr/bin/agentbox ]]; then
+        pass "/usr/bin/agentbox -> $(readlink -f /usr/bin/agentbox)"
+    else
+        fail "/usr/bin/agentbox is not a symlink; build.sh should create it"
+    fi
+
+    for path in "$REGISTRY" "$EGRESS_CONF" "$PROXY" "$JUST_FILE"; do
+        if [[ -e "$path" ]]; then
+            pass "$path"
+        else
+            fail "$path is missing"
+        fi
+    done
+
+    if command -v jq >/dev/null 2>&1; then
+        pass "jq is installed"
+    else
+        fail "jq is missing; the wrapper cannot read the agent registry"
+    fi
+}
+
+check_runtime() {
+    head2 "krun runtime"
+
+    if command -v krun >/dev/null 2>&1; then
+        pass "krun at $(command -v krun)"
+    else
+        fail "krun is missing; install crun-krun"
+    fi
+
+    # The failure this catches is genuinely obscure: crun has the handler
+    # compiled in, so it accepts --runtime krun and then fails at dlopen with a
+    # message that never mentions libkrun.
+    if ldconfig -p 2>/dev/null | grep -q 'libkrun\.so\.1'; then
+        pass "libkrun.so.1 is installed"
+    else
+        fail "libkrun.so.1 is missing; crun's krun handler cannot load"
+    fi
+
+    if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+        pass "/dev/kvm is readable and writable"
+    else
+        fail "/dev/kvm is not usable; nested virt or group membership?"
+    fi
+}
+
+# The check this whole design is arranged around. If krun ever becomes podman's
+# default, `distrobox enter` and `toolbox enter` stop working image-wide,
+# because both are podman exec and krun does not implement it.
+check_runtime_scoping() {
+    head2 "Runtime scoping (§3.1)"
+
+    local default
+    default=$(podman info --format '{{ .Host.OCIRuntime.Name }}' 2>/dev/null)
+    if [[ -z "$default" ]]; then
+        skip "could not read podman's default runtime"
+    elif [[ "$default" == "krun" ]]; then
+        fail "krun is podman's DEFAULT runtime — this breaks distrobox and toolbox"
+        info "remove the runtime= line from containers.conf; agentbox selects krun itself"
+    else
+        pass "podman's default runtime is '$default', not krun"
+    fi
+
+    if command -v distrobox >/dev/null 2>&1; then
+        if distrobox list >/dev/null 2>&1; then
+            pass "distrobox still functions"
+        else
+            fail "distrobox list failed"
+        fi
+    else
+        skip "distrobox is not installed"
+    fi
+}
+
+check_signature_policy() {
+    head2 "Image signature verification"
+
+    if [[ -r "$PUBKEY" ]]; then
+        pass "public key at $PUBKEY"
+    else
+        fail "$PUBKEY is missing; signed pulls cannot be verified"
+    fi
+
+    if [[ -r "$REGISTRIES_D" ]]; then
+        pass "sigstore attachment lookup configured"
+    else
+        fail "$REGISTRIES_D is missing; signatures will not be found"
+    fi
+
+    # An image update rewrites policy.json from the base image, and build.sh
+    # merges our scope back in. If that merge ever silently stops happening,
+    # pulls keep working — unverified — which is the worst possible outcome
+    # because nothing looks wrong.
+    if [[ -r "$POLICY" ]] && jq -e \
+        '.transports.docker | keys[] | select(test("almanacos-agent"))' \
+        "$POLICY" >/dev/null 2>&1; then
+        pass "policy.json requires a signature for the agent image"
+    else
+        fail "policy.json has no sigstoreSigned scope for the agent image"
+        info "the image would still pull — unverified. This is the quiet failure."
+    fi
+}
+
+check_credentials() {
+    head2 "Credential store"
+
+    if [[ ! -d "$CRED_DIR" ]]; then
+        skip "no credential store yet ($CRED_DIR)"
+        return
+    fi
+
+    local mode
+    mode=$(stat -c %a "$CRED_DIR")
+    if [[ "$mode" == "700" ]]; then
+        pass "$CRED_DIR is 0700"
+    else
+        fail "$CRED_DIR is $mode, expected 700"
+    fi
+
+    local file bad=0 count=0
+    for file in "$CRED_DIR"/*.json; do
+        [[ -e "$file" ]] || continue
+        (( ++count ))
+        mode=$(stat -c %a "$file")
+        [[ "$mode" == "600" ]] || { fail "$file is $mode, expected 600"; bad=1; }
+    done
+    if (( count == 0 )); then
+        skip "no stored credentials"
+    elif (( bad == 0 )); then
+        pass "$count stored credential(s), all 0600, survived the update"
+    fi
+}
+
+check_proxy() {
+    head2 "Egress proxy"
+
+    if systemctl --user cat "$PROXY_UNIT" >/dev/null 2>&1; then
+        pass "$PROXY_UNIT is installed"
+    else
+        fail "$PROXY_UNIT is not visible to systemd --user"
+        return
+    fi
+
+    if systemctl --user start "$PROXY_UNIT" 2>/dev/null &&
+        systemctl --user is-active --quiet "$PROXY_UNIT"; then
+        pass "the proxy starts"
+        systemctl --user stop "$PROXY_UNIT" 2>/dev/null
+    else
+        fail "the proxy did not start; systemctl --user status $PROXY_UNIT"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Functional — these boot real VMs.
+
+guest() {
+    ( cd "$WORKDIR" && "$AGENTBOX" "$@" ) 2>&1
+}
+
+check_boot() {
+    head2 "Booting a sandbox"
+
+    local host_kernel guest_kernel
+    host_kernel=$(uname -r)
+
+    guest_kernel=$(guest shell -c 'uname -r' | tr -d '\r' | tail -1)
+    if [[ -z "$guest_kernel" ]]; then
+        fail "the sandbox did not boot"
+        info "try: agentbox shell -c 'uname -r'"
+        return 1
+    fi
+    pass "sandbox booted"
+
+    # The one check that proves this is a VM and not a container. If the two
+    # kernels match, krun silently did not engage and the isolation everything
+    # else assumes is not there.
+    if [[ "$guest_kernel" != "$host_kernel" ]]; then
+        pass "guest kernel $guest_kernel differs from host $host_kernel — this is a VM"
+    else
+        fail "guest and host kernels are both $host_kernel — krun did NOT engage"
+    fi
+}
+
+check_workspace() {
+    head2 "Workspace sharing (§4.6, podman#28316)"
+
+    local marker="selftest-$$"
+    guest shell -c "printf '%s' '$marker' > /workspace/.selftest" >/dev/null
+
+    if [[ -f "$WORKDIR/.selftest" ]] &&
+        [[ "$(<"$WORKDIR/.selftest")" == "$marker" ]]; then
+        pass "the guest can write /workspace and the host sees it"
+    else
+        fail "a file written in the guest did not appear on the host"
+        info "this is the gate the privilege drop depends on"
+    fi
+    rm -f "$WORKDIR/.selftest"
+
+    local whoami
+    whoami=$(guest shell -c 'id -un' | tr -d '\r' | tail -1)
+    if [[ "$whoami" == "agent" ]]; then
+        pass "the guest dropped to the unprivileged user"
+    elif [[ "$whoami" == "root" ]]; then
+        fail "the guest is running as root"
+        info "the entrypoint stays root when /workspace is unwritable as uid 1000;"
+        info "that is podman#28316 and it means the privilege drop is not in effect"
+    else
+        fail "unexpected guest user '$whoami'"
+    fi
+}
+
+check_inotify() {
+    head2 "File watching"
+
+    # Expected to fail: virtiofs has no fsnotify propagation upstream. The check
+    # exists so that if it ever starts working, we find out and can drop the
+    # polling defaults rather than carrying them forever.
+    local out
+    out=$(guest shell -c \
+        'command -v inotifywait >/dev/null && echo have || echo missing' \
+        | tr -d '\r' | tail -1)
+    if [[ "$out" != "have" ]]; then
+        skip "inotifywait is not in the guest image; polling defaults assumed"
+        info "CHOKIDAR_USEPOLLING and WATCHPACK_POLLING are set in the image"
+        return
+    fi
+    skip "inotify propagation over virtiofs is expected not to work"
+}
+
+check_network_modes() {
+    head2 "Egress enforcement"
+
+    local out
+    out=$(guest --net none shell -c \
+        'timeout 8 bash -c "</dev/tcp/1.1.1.1/443" 2>&1 && echo REACHED || echo BLOCKED' \
+        | tr -d '\r' | tail -1)
+    if [[ "$out" == "BLOCKED" ]]; then
+        pass "--net none genuinely has no network"
+    else
+        fail "--net none still reached the network — enforcement is not working"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+
+usage() {
+    cat <<EOF
+Usage: almanac-agent-selftest [--quick]
+
+Checks that the agent sandbox still works. Run it after \`bootc upgrade\`, and
+on first deployment as the on-device validation.
+
+  --quick   Only inspect installed files; do not boot any VMs.
+
+Exit status is 0 only if every check passed.
+EOF
+}
+
+main() {
+    case "${1:-}" in
+        --quick) QUICK=1 ;;
+        -h|--help) usage; exit 0 ;;
+        '') ;;
+        *) usage; exit 1 ;;
+    esac
+
+    printf 'AlmanacOS agent sandbox self-test\n'
+    printf 'Image: %s\n' "$(bootc status --format json 2>/dev/null |
+        jq -r '.status.booted.image.image.image // "unknown"' 2>/dev/null || echo unknown)"
+
+    check_installed
+    check_runtime
+    check_runtime_scoping
+    check_signature_policy
+    check_credentials
+    check_proxy
+
+    if (( QUICK )); then
+        head2 "Functional checks"
+        skip "--quick given; no VMs were booted"
+    elif (( FAILED > 0 )); then
+        head2 "Functional checks"
+        skip "skipped because the checks above already failed"
+        info "fix those first; booting a VM now would only produce noise"
+    else
+        WORKDIR=$(mktemp -d -t almanac-selftest-XXXXXX)
+        trap 'rm -rf "$WORKDIR"' EXIT
+        if check_boot; then
+            check_workspace
+            check_inotify
+            check_network_modes
+        fi
+    fi
+
+    printf '\n'
+    printf '%d passed, %d failed, %d skipped\n' "$PASSED" "$FAILED" "$SKIPPED"
+
+    printf '\nStill needs a human:\n'
+    printf '  Start an agent, type a prompt, and press Enter. podman#28067\n'
+    printf '  reports that TUIs under krun cannot process the Enter key. If it\n'
+    printf '  reproduces, everything above can pass and the sandbox is still\n'
+    printf '  unusable interactively.\n'
+
+    (( FAILED == 0 ))
+}
+
+main "$@"

@@ -575,16 +575,80 @@ reported success.
 
 ---
 
-## Phase 6 — Update durability
+## Phase 6 — Update durability  ✅
 
-After a second `bootc upgrade`: `agentbox` present and executable, `krun` still
-installed, ujust recipes still listed, the agent image still pulls and verifies,
-credentials in `~/.local/state` survived, and `distrobox enter` still works.
-`bootc container lint` runs at the end of every build and will flag anything
-unusual added to the image root — including, notably, content under `/var`,
-which is why nothing in this design stores state there.
+An image update replaces `/usr` wholesale. Everything this sandbox depends on
+lives there — the runtime, the wrapper, the signature policy, the ujust recipes
+— so any of it can silently stop existing, and the symptom would be a failed
+agent run days later with nothing pointing at the cause.
+
+Shipped as `almanac-agent-selftest`, reachable as `agentbox selftest` and
+`ujust almanac-agent-selftest`. It does double duty: the post-upgrade check, and
+the on-device validation Phase 2 always needed. Exit status is 0 only if every
+check passed, so it can gate something.
+
+**File checks** (`--quick` stops here, boots nothing): wrapper present and
+executable, `/usr/bin/agentbox` still a symlink, registry / allowlist / proxy /
+ujust file present, `jq` installed, krun + `libkrun.so.1` + `/dev/kvm`, the
+public key and `registries.d` entry, the proxy unit starting, and credential
+store modes still `0700`/`0600`.
+
+Two of these are worth calling out because they fail quietly rather than loudly:
+
+- **`policy.json` still carries the sigstore scope.** `build.sh` merges it back
+  in on every build. If that merge ever stops happening, pulls keep working —
+  *unverified*. Nothing looks wrong. This is the check that notices.
+- **krun is not podman's default runtime.** The §3.1 failure, from the running
+  system's point of view rather than the source tree's, which is what
+  `just check-krun-not-default` covers.
+
+**Functional checks** (boot real VMs): the sandbox boots at all; the guest
+kernel **differs from the host's**, which is the only check that proves this is
+a VM and not a container that silently fell back to crun; a file written in the
+guest appears on the host (§4.6); the guest is running as `agent` and not root,
+which is the podman#28316 gate stated as a pass/fail rather than a warning
+buried in a log; and `--net none` genuinely cannot reach the network.
+
+These are skipped if the file checks already failed — booting a VM on a broken
+install only produces noise on top of a diagnosis you already have.
+
+**Not automatable**, and reported as a manual step rather than quietly omitted:
+the Enter key in a TUI (podman#28067). Everything above can pass and the
+sandbox still be unusable interactively, so it is the last thing printed.
+
+### `agentbox shell`
+
+Added here because the self-test needed it, but useful on its own: boots a
+sandbox on the current directory and runs `bash`. Since krun does not implement
+`podman exec`, this is the *only* way to look inside one of these — there is no
+attaching to a sandbox that is already running. It deliberately gets no
+credentials; a debugging shell has no business holding a token.
 
 ---
+
+## Getting it onto hardware
+
+1. Merge the branch, let CI build and sign both images.
+2. `bootc upgrade` and reboot.
+3. `ujust almanac-agent-selftest` — expect the file checks green.
+4. `ujust almanac-update-agent-sandbox` to pull the guest image; the signature
+   is enforced during the pull.
+5. `ujust almanac-agent-selftest` again, now with the functional checks.
+6. `ujust almanac-agent-login claude`, then `agentbox claude` in a project, and
+   **press Enter on a prompt** — the one check no script can do.
+7. `agentbox egress probe` to settle whether strict egress enforcement is
+   achievable on this hardware (Phase 5, layer 2).
+
+### What is still open
+
+- `pi` and `hermes` are not built: their npm package names are recorded nowhere
+  here. Set `PI_PACKAGE`/`HERMES_PACKAGE` and flip `built` in `agents.json`.
+- `opencode-ai`, `claude setup-token`, and the credential variable names come
+  from documentation rather than from running the tools; first build confirms.
+- Per-agent `cpus`/`ram_mib` are defaults, not measurements.
+- The egress allowlist is a starting point. `agentbox egress log` finds what it
+  is missing.
+- Strict egress enforcement is unresolved pending `egress probe`.
 
 ## Verification
 

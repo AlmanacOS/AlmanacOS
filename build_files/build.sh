@@ -87,6 +87,7 @@ chmod +x /usr/libexec/almanac-memory
 chmod +x /usr/libexec/almanac-models
 chmod +x /usr/libexec/almanac-agentbox
 chmod +x /usr/libexec/almanac-agent-proxy
+chmod +x /usr/libexec/almanac-agent-selftest
 
 # `agentbox` is the name users type. It is deliberately not `claude`: a wrapper
 # that shadows the real binary on PATH means nobody can tell which one they are
