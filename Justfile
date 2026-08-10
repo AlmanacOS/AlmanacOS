@@ -14,6 +14,14 @@ export bib_image := env_var("BIB_IMAGE")
 export agent_image_name := lowercase(env_var("IMAGE_NAME")) + "-agent"
 export agent_image_desc := "AlmanacOS agent sandbox guest image"
 
+# The live ISO image, built from iso_image/Containerfile. This is AlmanacOS
+# plus a live session and Anaconda; titanoboa turns it into the ISO.
+export iso_image_name := lowercase(env_var("IMAGE_NAME")) + "-live"
+export iso_image_desc := "AlmanacOS live ISO image"
+
+# The container that assembles the ISO from the image above.
+export titanoboa_image := "ghcr.io/ublue-os/titanoboa:latest"
+
 alias build-vm := build-qcow2
 alias rebuild-vm := rebuild-qcow2
 alias run-vm := run-vm-qcow2
@@ -58,7 +66,8 @@ check-build-context:
     check_context() {
         local containerfile="$1" context="$2" src
         while read -r src; do
-            [[ -z "$src" || "$src" == --* ]] && continue
+            # --flags, and `COPY <<EOT /dst` heredocs, which have no source file.
+            [[ -z "$src" || "$src" == --* || "$src" == '<<'* ]] && continue
             if [[ ! -e "${context}/${src}" ]]; then
                 echo "ERROR: ${containerfile}: COPY ${src} — not found in context ${context}/" >&2
                 failed=1
@@ -68,6 +77,7 @@ check-build-context:
 
     check_context Containerfile .
     check_context agent_image/Containerfile agent_image
+    check_context iso_image/Containerfile iso_image
 
     # Everything the ctx stage carries is reachable only under /ctx. Counting
     # rather than pattern-matching the absence of a prefix: every mention of
@@ -182,7 +192,7 @@ sudoif command *args:
 #
 
 # Build the image using the specified parameters
-build $target_image=image_name $tag=default_tag $containerfile="Containerfile" $description=image_desc $context=".":
+build $target_image=image_name $tag=default_tag $containerfile="Containerfile" $description=image_desc $context="." $extra_args="":
     #!/usr/bin/env bash
 
     set -euox pipefail
@@ -210,8 +220,15 @@ build $target_image=image_name $tag=default_tag $containerfile="Containerfile" $
     LABELS+=("--label" "org.opencontainers.image.title=${target_image}")
     LABELS+=("--label" "org.opencontainers.image.vendor={{ repo_organization }}")
 
+    # Word-split rather than quoted: extra_args carries whole podman flags with
+    # their values ("--cap-add sys_admin"), which is exactly the case the
+    # splitting is for. Nothing user-supplied reaches it.
+    EXTRA_ARGS=()
+    read -ra EXTRA_ARGS <<< "${extra_args}"
+
     # This actually builds the image!
     PODMAN_BUILD_ARGS=("${BUILD_ARGS[@]}" "${LABELS[@]}" --pull=newer --tag "${target_image}:${tag}" --file "${containerfile}")
+    PODMAN_BUILD_ARGS+=(${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"})
 
     podman build "${PODMAN_BUILD_ARGS[@]}" "${context}"
 
@@ -222,6 +239,18 @@ build $target_image=image_name $tag=default_tag $containerfile="Containerfile" $
 
 # Example: just build-agent-image almanacos-agent latest
 build-agent-image $target_image=agent_image_name $tag=default_tag: (build target_image tag "agent_image/Containerfile" agent_image_desc "agent_image")
+
+# Build the live ISO image (the container, not the ISO)
+#
+# --cap-add sys_admin and --security-opt label=disable are required: build.sh
+# runs podman inside the build to embed the install payload, and regenerates the
+# initramfs. --squash keeps the live rootfs from carrying every intermediate
+# layer into the squashfs, where it would be dead weight on the ISO.
+#
+# `just build-iso` runs this and then assembles the ISO.
+
+# Example: just build-iso-image almanacos-live latest
+build-iso-image $target_image=iso_image_name $tag=default_tag: (build target_image tag "iso_image/Containerfile" iso_image_desc "iso_image" "--cap-add sys_admin --security-opt label=disable --squash")
 
 # Split the image for smaller updates (New)!
 rechunk $target_image=image_name $tag=default_tag:
@@ -442,9 +471,33 @@ build-qcow2 $target_image=("localhost/" + image_name) $tag=default_tag: && (_bui
 [group('Build Virtal Machine Image')]
 build-raw $target_image=("localhost/" + image_name) $tag=default_tag: && (_build-bib target_image tag "raw" "disk_config/disk.toml")
 
-# Build an ISO virtual machine image
+# Build the live ISO
+#
+# Not built by Bootc Image Builder. BIB was archived in June 2026 and its
+# anaconda-iso type did not survive the move into osbuild/image-builder; the ISO
+# is assembled by titanoboa, which reads everything it needs — boot menu,
+# kernel, initramfs, EFI binaries — out of the image itself. There is no
+# disk_config file for it, by design.
 [group('Build Virtal Machine Image')]
-build-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_build-bib target_image tag "iso" "disk_config/iso.toml")
+build-iso $target_image=("localhost/" + iso_image_name) $tag=default_tag: (build-iso-image target_image tag) (_rootful_load_image target_image tag)
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    mkdir -p output
+
+    # titanoboa's documented invocation. It reads the live rootfs through a
+    # type=image mount rather than being handed a tarball, which is why the
+    # image has to be in root's container storage first — the dependency above.
+    just sudoif podman run --rm -it \
+        --pull=newer \
+        --cap-add sys_admin --security-opt label=disable \
+        -v "$(pwd)/output":/output \
+        -v /var/lib/containers/storage:/usr/lib/containers/storage:ro \
+        --mount type=image,source="${target_image}:${tag}",dst=/rootfs \
+        "${titanoboa_image}"
+
+    just sudoif chown -R "$(id -u):$(id -g)" output/
+    ls -lh output/*.iso
 
 # Rebuild a QCOW2 virtual machine image
 [group('Build Virtal Machine Image')]
@@ -454,9 +507,14 @@ rebuild-qcow2 $target_image=("localhost/" + image_name) $tag=default_tag: && (_r
 [group('Build Virtal Machine Image')]
 rebuild-raw $target_image=("localhost/" + image_name) $tag=default_tag: && (_rebuild-bib target_image tag "raw" "disk_config/disk.toml")
 
-# Rebuild an ISO virtual machine image
-[group('Build Virtal Machine Image')]
-rebuild-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_rebuild-bib target_image tag "iso" "disk_config/iso.toml")
+# There is deliberately no `rebuild-iso`.
+#
+# It would not mean anything. The live image is built FROM the *published* base
+# image, and build.sh embeds the install payload by pulling that same published
+# reference — so a locally rebuilt base image reaches neither. Testing a change
+# to the OS in an ISO means publishing the OS image first. That is a real
+# constraint of this path, not an oversight; ublue's own images work the same
+# way.
 
 # Run a virtual machine with the specified image type and configuration
 _run-vm $target_image $tag $type $config:
@@ -466,7 +524,9 @@ _run-vm $target_image $tag $type $config:
     # Determine the image file based on the type
     image_file="output/${type}/disk.${type}"
     if [[ $type == iso ]]; then
-        image_file="output/bootiso/install.iso"
+        # titanoboa names its output itself rather than using a fixed path.
+        image_file=$(ls -1 output/*.iso 2>/dev/null | head -1 || true)
+        : "${image_file:=output/none.iso}"
     fi
 
     # Build the image if it does not exist
@@ -510,7 +570,7 @@ run-vm-raw $target_image=("localhost/" + image_name) $tag=default_tag: && (_run-
 
 # Run a virtual machine from an ISO
 [group('Run Virtal Machine')]
-run-vm-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_run-vm target_image tag "iso" "disk_config/iso.toml")
+run-vm-iso $target_image=("localhost/" + iso_image_name) $tag=default_tag: && (_run-vm target_image tag "iso" "")
 
 # Run a virtual machine using systemd-vmspawn
 [group('Run Virtal Machine')]

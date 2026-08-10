@@ -1,0 +1,34 @@
+# The live ISO's boot menu.
+#
+# Titanoboa reads this from /usr/lib/bootc-image-builder/iso.yaml inside the
+# container and generates the ISO's grub config from it.
+#
+# These entries boot a live session — `root=live:CDLABEL=... rd.live.image` —
+# not an installer. The installer is Anaconda, launched from inside the running
+# desktop by `liveinst`. That is the difference from a traditional boot.iso and
+# it is why there are no inst.* arguments here.
+#
+# inst.profile is the exception: Anaconda reads /proc/cmdline whenever it
+# starts, however it was started, and this is what selects
+# /etc/anaconda/profile.d/almanacos.conf. Profile *detection* by os_id cannot
+# work here — AlmanacOS inherits its os-release from ublue's kinoite-main and
+# reports itself as Fedora — so the profile has to be named explicitly.
+
+# Must match root=live:CDLABEL= below. The initramfs finds the squashfs by this
+# label; changing one without the other boots to a dracut shell.
+label: AlmanacOS
+
+grub2:
+  default: 0
+  timeout: 10
+  entries:
+    - name: "AlmanacOS Live"
+      linux: "/images/pxeboot/vmlinuz root=live:CDLABEL=AlmanacOS rd.live.image inst.profile=almanacos enforcing=0 quiet rhgb"
+      initrd: "/images/pxeboot/initrd.img"
+
+    # The entry that gets used on hardware where the first one shows a black
+    # screen — which on an image aimed at AMD APUs is worth having one keypress
+    # away rather than one rebuild away.
+    - name: "AlmanacOS Live (basic graphics)"
+      linux: "/images/pxeboot/vmlinuz root=live:CDLABEL=AlmanacOS rd.live.image inst.profile=almanacos enforcing=0 nomodeset quiet rhgb"
+      initrd: "/images/pxeboot/initrd.img"
