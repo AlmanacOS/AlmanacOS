@@ -64,3 +64,7 @@ almanac-agent-login agent:
 almanac-agent-logout agent:
     @/usr/libexec/almanac-agentbox logout "{{ agent }}"
 
+# Show or edit the agent sandbox egress allowlist
+[group('Almanac')]
+almanac-agent-egress action="show" host="":
+    @/usr/libexec/almanac-agentbox egress "{{ action }}" "{{ host }}"

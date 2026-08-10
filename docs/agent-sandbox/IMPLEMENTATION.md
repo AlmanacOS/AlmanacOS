@@ -475,44 +475,103 @@ run without a tty.
 
 ---
 
-## Phase 5 — Egress
+## Phase 5 — Egress  ✅ (layer 1) / ⚠️ (layer 2)
 
-The spec's firewalld design does not work (correction 3 above). Replacing it
-with a two-layer design, because policy and enforcement need different tools:
+The spec's firewalld design does not work, for the reason in correction 3: under
+TSI the guest has no IP and no interface, so a policy scoped to a podman network
+has nothing to match on. What replaced it splits policy from enforcement,
+because they need different mechanisms — and the honest result is that only one
+of the two is finished.
 
-**Layer 1 — policy: a host-side filtering CONNECT proxy.** A small user-scope
-systemd service (`~/.config` or `/usr/lib/systemd/user/almanac-agent-proxy.service`,
-rootless, no privileged socket) bound to loopback, allowlisting by **hostname**
-from the CONNECT request. Hostname granularity is not a nicety here — agent API
-endpoints sit behind CDNs with rotating IPs, so an IP-based nftables allowlist
-is not merely awkward, it is unmaintainable. No TLS interception, so no CA
-injection into the guest. The guest is pointed at it with
-`HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY`.
+### Layer 1 — policy: `almanac-agent-proxy`  ✅
 
-**Layer 2 — enforcement: deny everything else at the netns.** A hostile guest
-will simply ignore `HTTPS_PROXY`, so layer 1 alone is configuration, not
-security. Under TSI the guest's sockets are the VMM's sockets, and the VMM sits
-in podman's rootless network namespace — so `--network none` gives the VMM a
-loopback-only netns and genuinely denies everything. The question to settle
-on-device is how the proxy stays reachable through that:
+A filtering CONNECT proxy, stdlib Python, run as a **user** systemd service. It
+reads the hostname from `CONNECT host:port`, checks an allowlist, and splices or
+refuses. Hostname granularity is not a nicety: every endpoint these agents use
+sits behind a CDN with rotating addresses, so an IP allowlist is wrong within
+the week. The `CONNECT` line is the last place the hostname is legible before
+TLS starts.
 
-- **Preferred:** bind-mount an AF_UNIX socket for the proxy into the container.
-  TSI proxies AF_UNIX as well as AF_INET, so this would be a true default-deny
-  with exactly one hole. Needs testing — client support for unix-socket proxies
-  is uneven, and whether TSI carries a bind-mounted socket is unverified.
-- **Fallback:** force `krun.use_passt=1` so the guest gets a real virtio-net
-  interface and IP, then filter conventionally. Cost: crun forks its **own**
-  passt (`passt -t all -u all --no-dhcp-dns --no-map-gw --fd N`), separate from
-  podman's pasta, which limits how much podman-side network config means
-  anything.
-- **Last resort:** default networking plus proxy env vars, documented honestly
-  as advisory-only.
+No TLS interception, so no CA generation and nothing injected into the guest's
+trust store. Only ports 80 and 443, so an allowlisted hostname does not double
+as permission to reach every service on that host. The allowlist reloads on
+mtime change, so `egress allow` takes effect without a restart.
 
-**Prerequisite, per §5:** enumerate every host each of the four agents actually
-contacts — API, auth, telemetry, update checks, and the npm registry, since
-these agents install packages. An allowlist with only the API endpoint produces
-confusing partial failures instead of clean errors. `almanac-agent-egress` is
-how the list gets inspected and amended.
+`agentbox egress show | allow | deny | log | test | probe`, plus
+`ujust almanac-agent-egress`. The system list is at
+`/usr/share/almanac/agent-egress.conf` and is replaced on image update; user
+additions go to `~/.config/almanac/agent-egress.conf` and are never overwritten.
+
+**The shipped list is a starting point, not an enumeration.** §5 asks for every
+host each agent contacts; what is committed is what the agents are documented or
+observed to use — npm, GitHub's four hosts, the Anthropic endpoints, models.dev,
+OpenAI, OpenRouter. A missing entry does not fail cleanly, it hangs, which is
+why `egress log` exists and is pointed at from the failure message.
+
+### Layer 2 — enforcement: `--net`  ⚠️
+
+Three modes, and the split between them is the whole point:
+
+| mode | what it does | enforced? |
+|---|---|---|
+| `open` (default) | no restriction | — |
+| `filtered` | guest pointed at the proxy via `HTTPS_PROXY` | **no** |
+| `none` | `--network none`; the VMM's namespace has no route | **yes** |
+
+`filtered` is advisory. An agent that ignores `HTTPS_PROXY` and opens a socket
+is unaffected by anything in layer 1. It buys a log of what the agent reaches
+and a stop on accidental traffic — worth having, not worth trusting.
+
+`filtered` is deliberately **not** the default. Defaulting to it would describe
+the sandbox as network-restricted when it is not, and a boundary people believe
+in but which does not hold is worse than an absent one.
+
+`none` is genuinely enforcing, because under TSI the guest's sockets *are* the
+VMM's sockets and the VMM is in a namespace with nothing but loopback. It is
+also the only mode that costs the agent its network entirely.
+
+### The gap, and why it ships as a probe
+
+The design that would give both — default-deny *and* usable egress — is
+`--network none` plus the proxy reachable over a **bind-mounted AF_UNIX socket**,
+since TSI proxies AF_UNIX as well as AF_INET. That would be a real boundary with
+exactly one deliberate hole.
+
+It is unverified. It depends on whether libkrun carries a bind-mounted socket
+into the guest, and on whether the agents' HTTP clients accept a unix-socket
+proxy. Shipping it as the default would mean shipping an untested security
+boundary, which is the one thing worse than shipping none.
+
+So it ships as `agentbox egress probe`: it starts a proxy on a unix socket,
+boots a sandbox with `--network none`, and reports whether the socket was
+reachable. **Run it on hardware.** If it passes, strict mode is achievable here
+and this section should be rewritten; if it fails, `--net none` stays the only
+enforcing option and that is worth writing down too. The proxy already listens
+on `--unix-socket` in anticipation.
+
+Also unresolved and only answerable on-device: whether `host.containers.internal`
+resolves from inside the guest under the rootless network backend in use. That
+is how `filtered` addresses the proxy, and `ALMANAC_AGENT_PROXY_HOST` overrides
+it when it does not.
+
+### Verified how
+
+The proxy is the one component in this whole design that runs fully on a
+development machine, so it is properly tested rather than dry-run: 13 checks,
+all passing. Allowlist matching including case-insensitivity, trailing dots,
+wildcards, and two confusion attacks — `api.anthropic.com.evil.com` and
+`notapi.anthropic.com` both correctly refused, and `*.npmjs.org` correctly does
+*not* grant the bare apex. Protocol behaviour: 403 for unlisted host, 403 for a
+non-web port, 501 for non-CONNECT, 400 for a malformed target. End to end
+against the live network: a real TLS session to `api.anthropic.com` through the
+tunnel, a 403 for a denied host, and a live allowlist reload taking effect
+without a restart.
+
+Wrapper side, dry-run: `--net none` emits `--network none`, `--net open` emits
+nothing, an unknown mode is refused, and `egress allow`/`deny`/`show` round-trip
+— including removing the only entry, which exposed a `set -e` bug where `grep
+-v` exits 1 after filtering out every line and killed the command before it
+reported success.
 
 ---
 

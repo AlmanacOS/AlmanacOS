@@ -14,7 +14,7 @@
 # What the agent can reach, and nothing else:
 #   - the project directory, bind-mounted at /workspace
 #   - whatever credentials are forwarded by name (see forward_tokens)
-#   - the network, until Phase 5 lands the egress allowlist
+#   - the network, as permitted by --net (open by default; see NET_MODE)
 #
 # Deliberately NOT set: `runtime = "krun"` in containers.conf. Making krun the
 # global default is the tempting one-line version of this script and it breaks
@@ -73,6 +73,37 @@ readonly PASSTHROUGH_VARS=(
     NO_COLOR
     FORCE_COLOR
 )
+
+# Egress. Three modes, and the difference between them is the difference
+# between policy and enforcement — which is worth stating plainly, because
+# getting it wrong is how a sandbox ends up trusted for something it does not
+# actually do.
+#
+#   open      No restriction. The agent reaches whatever the host can reach.
+#   filtered  The guest is pointed at the filtering proxy via HTTPS_PROXY.
+#             ADVISORY: an agent that ignores the variable and opens a socket
+#             directly is unaffected. This buys you a log of what the agent
+#             reaches and a stop on accidental traffic, not containment.
+#   none      --network none. The VMM's namespace has no route anywhere, so
+#             under TSI the guest's sockets have nowhere to go. ENFORCED, and
+#             the only one of the three that is.
+#
+# `filtered` is not the default. Defaulting to it would describe the sandbox as
+# network-restricted when it is not, and a boundary people believe in but that
+# does not hold is worse than an absent one.
+NET_MODE="${ALMANAC_AGENT_NET:-open}"
+
+PROXY_PORT="${ALMANAC_AGENT_PROXY_PORT:-18080}"
+
+# How the guest addresses the host. Under TSI the VMM performs the connect from
+# inside podman's network namespace, so the host's own loopback is not the
+# guest's loopback; podman publishes itself as host.containers.internal for
+# exactly this. Overridable because whether that name resolves depends on the
+# rootless network backend, and `egress probe` is what finds out.
+PROXY_HOST="${ALMANAC_AGENT_PROXY_HOST:-host.containers.internal}"
+
+readonly SYSTEM_EGRESS_CONF=/usr/share/almanac/agent-egress.conf
+USER_EGRESS_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/almanac/agent-egress.conf"
 
 EXTRA_MOUNTS=()
 
@@ -275,6 +306,213 @@ cmd_logout() {
     printf 'it upstream is the step that matters and this was not it.\n'
 }
 
+# ---------------------------------------------------------------------------
+# Egress
+
+proxy_running() {
+    systemctl --user is-active --quiet almanac-agent-proxy.service 2>/dev/null
+}
+
+start_proxy() {
+    proxy_running && return 0
+    systemctl --user start almanac-agent-proxy.service 2>/dev/null ||
+        die "could not start almanac-agent-proxy.service; check \`systemctl --user status almanac-agent-proxy\`"
+    # The unit is Type=exec, so start returns once the process is up, but the
+    # listener may trail it by a moment.
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        proxy_running || break
+        (exec 3<>"/dev/tcp/127.0.0.1/$PROXY_PORT") 2>/dev/null && return 0
+        sleep 0.2
+    done
+    proxy_running || die "almanac-agent-proxy failed to stay up"
+}
+
+# Sets NET_FLAGS for the run. Returns nothing else; the mode's meaning is
+# documented where NET_MODE is defined.
+NET_FLAGS=()
+setup_network() {
+    NET_FLAGS=()
+    case "$NET_MODE" in
+        open) ;;
+        none)
+            NET_FLAGS=(--network none)
+            ;;
+        filtered)
+            start_proxy
+            local url="http://$PROXY_HOST:$PROXY_PORT"
+            export HTTP_PROXY="$url" HTTPS_PROXY="$url"
+            export http_proxy="$url" https_proxy="$url"
+            # Loopback and the podman-internal name itself must never be
+            # proxied, or the guest tries to reach the proxy through the proxy.
+            export NO_PROXY="localhost,127.0.0.1,$PROXY_HOST"
+            export no_proxy="$NO_PROXY"
+            NET_FLAGS=(
+                --env HTTP_PROXY --env HTTPS_PROXY
+                --env http_proxy --env https_proxy
+                --env NO_PROXY --env no_proxy
+            )
+            ;;
+        *)
+            die "unknown --net mode '$NET_MODE'; expected open, filtered, or none"
+            ;;
+    esac
+}
+
+egress_conf_paths() { printf '%s\n' "$SYSTEM_EGRESS_CONF" "$USER_EGRESS_CONF"; }
+
+cmd_egress() {
+    local action="${1:-show}" host="${2:-}"
+
+    case "$action" in
+        show|'')
+            printf 'System list: %s\n' "$SYSTEM_EGRESS_CONF"
+            printf 'Your list:   %s\n\n' "$USER_EGRESS_CONF"
+            local path
+            while read -r path; do
+                [[ -r "$path" ]] || continue
+                grep -vE '^\s*(#|$)' "$path" 2>/dev/null | sed 's/^/  /'
+            done < <(egress_conf_paths)
+            printf '\n'
+            if proxy_running; then
+                printf 'Proxy: running on 127.0.0.1:%s\n' "$PROXY_PORT"
+            else
+                printf 'Proxy: not running (starts on demand with --net filtered)\n'
+            fi
+            printf '\n'
+            printf 'This list is policy, not enforcement. It only applies to a\n'
+            printf 'sandbox started with --net filtered, and only for as long as\n'
+            printf 'the agent honours HTTPS_PROXY. Use --net none for a boundary.\n'
+            ;;
+        allow)
+            [[ -n "$host" ]] || die "usage: almanac-agentbox egress allow <host>"
+            mkdir -p "$(dirname "$USER_EGRESS_CONF")"
+            touch "$USER_EGRESS_CONF"
+            if grep -qxF "$host" "$USER_EGRESS_CONF" 2>/dev/null; then
+                printf '%s is already on your list.\n' "$host"
+                return
+            fi
+            printf '%s\n' "$host" >> "$USER_EGRESS_CONF"
+            printf 'Added %s to %s\n' "$host" "$USER_EGRESS_CONF"
+            printf 'The proxy rereads the file on change; no restart needed.\n'
+            ;;
+        deny)
+            [[ -n "$host" ]] || die "usage: almanac-agentbox egress deny <host>"
+            [[ -f "$USER_EGRESS_CONF" ]] ||
+                die "no user allowlist at $USER_EGRESS_CONF"
+            grep -qxF "$host" "$USER_EGRESS_CONF" 2>/dev/null || {
+                warn "$host is not in your list"
+                if grep -qxF "$host" "$SYSTEM_EGRESS_CONF" 2>/dev/null; then
+                    warn "it is on the system list, which this command cannot edit"
+                    warn "edit $SYSTEM_EGRESS_CONF in the image to remove it"
+                fi
+                return 1
+            }
+            # `|| true` because grep exits 1 when it filters out every line,
+            # which is exactly what removing your only entry does.
+            grep -vxF "$host" "$USER_EGRESS_CONF" > "$USER_EGRESS_CONF.tmp" || true
+            mv "$USER_EGRESS_CONF.tmp" "$USER_EGRESS_CONF"
+            printf 'Removed %s from your list.\n' "$host"
+            ;;
+        log)
+            printf 'Recent proxy decisions (ALLOW / DENY / FAIL):\n\n'
+            journalctl --user -u almanac-agent-proxy.service -n "${host:-50}" \
+                --no-pager -o cat 2>/dev/null ||
+                printf '(no journal for the proxy yet)\n'
+            printf '\nA DENY here is the fastest way to find what the allowlist\n'
+            printf 'is missing — the agent-side symptom is usually a hang.\n'
+            ;;
+        test)
+            [[ -n "$host" ]] || die "usage: almanac-agentbox egress test <host>"
+            start_proxy
+            printf 'Asking the proxy for %s:443 ...\n' "$host"
+            if curl -sS -o /dev/null --max-time 15 \
+                --proxy "http://127.0.0.1:$PROXY_PORT" "https://$host/"; then
+                printf 'allowed\n'
+            else
+                printf 'refused or unreachable — see `almanac-agentbox egress log`\n'
+                return 1
+            fi
+            ;;
+        probe)
+            cmd_egress_probe
+            ;;
+        *)
+            die "unknown egress action '$action'; expected show, allow, deny, log, test, probe"
+            ;;
+    esac
+}
+
+# The experiment that decides whether `filtered` can ever become enforcing.
+#
+# Under `--network none` the VMM's namespace has no route anywhere, which is a
+# real boundary. The open question is whether a bind-mounted AF_UNIX socket can
+# be the one deliberate hole through it: libkrun's TSI proxies AF_UNIX as well
+# as AF_INET, so in principle the guest could reach the proxy over a socket file
+# on the virtiofs share while having no network at all. If that holds, the
+# sandbox gets default-deny egress with hostname-granular policy, which is the
+# design the spec wanted and could not have.
+#
+# It is unverified, it depends on both libkrun's behaviour and on whether the
+# agents' HTTP clients accept a unix-socket proxy URL, and guessing would mean
+# shipping a boundary nobody has tested. So it ships as a probe instead.
+cmd_egress_probe() {
+    require_jq
+    check_preconditions
+    ensure_image
+
+    local sockdir sock
+    sockdir=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/almanac-probe.XXXXXX")
+    sock="$sockdir/proxy.sock"
+
+    printf 'Probing whether a sandbox with no network can still reach a\n'
+    printf 'bind-mounted AF_UNIX socket through libkrun TSI.\n\n'
+
+    /usr/libexec/almanac-agent-proxy --unix-socket "$sock" --port 0 \
+        >"$sockdir/proxy.log" 2>&1 &
+    local proxy_pid=$!
+    # shellcheck disable=SC2064
+    trap "kill $proxy_pid 2>/dev/null; rm -rf '$sockdir'" RETURN
+
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        [[ -S "$sock" ]] && break
+        sleep 0.2
+    done
+    [[ -S "$sock" ]] || { warn "the probe proxy did not come up"; cat "$sockdir/proxy.log" >&2; return 1; }
+
+    local result=0
+    podman run --rm \
+        --runtime krun \
+        --network none \
+        --annotation krun.cpus=1 \
+        --annotation krun.ram_mib=1024 \
+        --volume "$sockdir:/probe:Z" \
+        --entrypoint /usr/bin/node \
+        "$IMAGE" -e '
+            const net = require("net");
+            const s = net.connect("/probe/proxy.sock");
+            s.on("connect", () => s.write("CONNECT example.com:443 HTTP/1.1\r\n\r\n"));
+            s.on("data", d => { console.log("REPLY:", d.toString().split("\r\n")[0]); process.exit(0); });
+            s.on("error", e => { console.log("ERROR:", e.message); process.exit(1); });
+            setTimeout(() => { console.log("TIMEOUT"); process.exit(1); }, 10000);
+        ' || result=$?
+
+    printf '\n'
+    if (( result == 0 )); then
+        printf 'The socket was reachable from a sandbox with --network none.\n'
+        printf 'That means strict enforcement is achievable on this machine:\n'
+        printf 'default-deny at the namespace, with the proxy as the one hole.\n'
+        printf 'Record it in docs/agent-sandbox/IMPLEMENTATION.md and wire it up.\n'
+    else
+        printf 'Not reachable. `--net filtered` stays advisory on this machine,\n'
+        printf 'and `--net none` remains the only enforcing option.\n'
+    fi
+    printf '\nProxy log:\n'
+    sed 's/^/  /' "$sockdir/proxy.log"
+    return "$result"
+}
+
 # Run an agent's token-minting command in a sandbox with no project mounted, so
 # a device-code flow can be completed without the agent being installed on the
 # host. /workspace is a tmpfs: nothing it writes outlives the VM.
@@ -436,6 +674,22 @@ cmd_status() {
 
     printf '\n  Credential store: %s\n' "$CRED_DIR"
     printf '  Never mounted into a sandbox; tokens are passed by name at run time.\n'
+
+    printf '\nEgress\n'
+    printf '  default mode    %s\n' "$NET_MODE"
+    if proxy_running; then
+        printf '  proxy           running on 127.0.0.1:%s\n' "$PROXY_PORT"
+    else
+        printf '  proxy           stopped (starts on demand with --net filtered)\n'
+    fi
+    printf '  allowlist       %s\n' "$SYSTEM_EGRESS_CONF"
+    if [[ -f "$USER_EGRESS_CONF" ]]; then
+        printf '                  %s (%s extra)\n' "$USER_EGRESS_CONF" \
+            "$(grep -cvE '^\s*(#|$)' "$USER_EGRESS_CONF" 2>/dev/null || echo 0)"
+    fi
+    printf '\n'
+    printf '  Only --net none is enforced. --net filtered is policy the guest\n'
+    printf '  has to cooperate with, and a compromised agent will not.\n'
 }
 
 # Pulling is what enforces the signature. policy.json requires a sigstore
@@ -514,6 +768,8 @@ cmd_run() {
     local env_flags=()
     mapfile -t env_flags < <(forward_passthrough)
 
+    setup_network
+
     load_cred "$agent"
     if (( ${#token_flags[@]} == 0 && ${#CRED_FLAGS[@]} == 0 )); then
         warn "no credential for '$agent'; try \`ujust almanac-agent-login $agent\`"
@@ -555,6 +811,7 @@ cmd_run() {
         ${GIT_FLAGS[@]+"${GIT_FLAGS[@]}"} \
         ${token_flags[@]+"${token_flags[@]}"} \
         ${CRED_FLAGS[@]+"${CRED_FLAGS[@]}"} \
+        ${NET_FLAGS[@]+"${NET_FLAGS[@]}"} \
         "$IMAGE" "$guest_cmd" "$@"
 }
 
@@ -592,6 +849,8 @@ Commands:
   ps                  Show running sandboxes
   login <agent>       Store a credential for an agent
   logout <agent>      Forget the stored credential (does NOT revoke it)
+  egress [action]     show | allow <host> | deny <host> | log | test <host>
+                      | probe
 
 Options:
   --cpus N            vCPUs for the VM. Defaults to the agent's own figure from
@@ -600,12 +859,26 @@ Options:
   --mount SRC:DST     Bind another host path into the VM. Repeatable.
                       Every one of these widens the blast radius; the workspace
                       alone is the design.
+  --net MODE          open (default) | filtered | none
+
+                      open      no restriction.
+                      filtered  point the guest at the allowlisting proxy.
+                                ADVISORY — an agent that ignores HTTPS_PROXY is
+                                unaffected. Buys a log and a stop on accidental
+                                traffic, not containment.
+                      none      no network at all. The only enforcing option,
+                                because it is the only one that is a property
+                                of the namespace rather than of the guest's
+                                cooperation.
 
 Environment:
   ALMANAC_AGENT_IMAGE     Guest image reference (default $IMAGE)
   ALMANAC_AGENT_CPUS      Same as --cpus
   ALMANAC_AGENT_RAM       Same as --ram
   ALMANAC_AGENT_CRED_DIR  Credential store (default $CRED_DIR)
+  ALMANAC_AGENT_NET       Same as --net (default $NET_MODE)
+  ALMANAC_AGENT_PROXY_PORT   Proxy port (default $PROXY_PORT)
+  ALMANAC_AGENT_PROXY_HOST   How the guest addresses the host (default $PROXY_HOST)
 
 Credentials resolve most-specific first: a variable already set in your shell,
 then the store written by `login`. The store is never mounted into the VM — the
@@ -629,6 +902,7 @@ main() {
         case "${1:-}" in
             --cpus) CPUS="${2:-}"; shift 2 ;;
             --ram) RAM_MIB="${2:-}"; shift 2 ;;
+            --net) NET_MODE="${2:-}"; shift 2 ;;
             --mount)
                 [[ -n "${2:-}" ]] || die "--mount needs SRC:DST"
                 # The one mount that must never be allowed. Handing an agent the
@@ -648,6 +922,7 @@ main() {
             ps) cmd_ps; return ;;
             login) shift; cmd_login "$@"; return ;;
             logout) shift; cmd_logout "$@"; return ;;
+            egress) shift; cmd_egress "$@"; return ;;
             -h|--help|'') usage; return ;;
             --) shift; break ;;
             -*) die "unknown option $1" ;;
