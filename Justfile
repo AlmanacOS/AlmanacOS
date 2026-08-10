@@ -33,6 +33,41 @@ check:
     echo "Checking syntax: Justfile"
     just --unstable --fmt --check -f Justfile
     just check-krun-not-default
+    just check-copy-sources
+
+# Verify every COPY source exists in that image's build context
+#
+# COPY paths resolve against the build CONTEXT, not against the directory the
+# Containerfile lives in. A Containerfile in a subdirectory that copies the
+# files next to it is correct only if that subdirectory is also the context —
+# and getting it wrong fails several minutes into a CI build, after the
+# expensive layers, with an error that names a path nobody wrote.
+[group('Just')]
+check-copy-sources:
+    #!/usr/bin/bash
+    set -uo pipefail
+
+    failed=0
+
+    check_context() {
+        local containerfile="$1" context="$2" src
+        while read -r src; do
+            [[ -z "$src" || "$src" == --* ]] && continue
+            if [[ ! -e "${context}/${src}" ]]; then
+                echo "ERROR: ${containerfile}: COPY ${src} — not found in context ${context}/" >&2
+                failed=1
+            fi
+        done < <(grep -E '^\s*COPY\s' "$containerfile" | awk '{for (i = 2; i < NF; i++) print $i}')
+    }
+
+    check_context Containerfile .
+    check_context agent_image/Containerfile agent_image
+
+    if [[ "$failed" -ne 0 ]]; then
+        echo "A COPY source is missing; see the build recipe's note about contexts." >&2
+        exit 1
+    fi
+    echo "OK: every COPY source resolves against its build context"
 
 # Refuse to ship krun as podman's default runtime
 #
@@ -107,6 +142,12 @@ sudoif command *args:
 #   $tag - The tag for the image (default: $default_tag).
 #   $containerfile - The Containerfile to build (default: Containerfile).
 #   $description - The image description label (default: $image_desc).
+#   $context - The build context directory (default: the repo root).
+#
+# Note that COPY paths inside a Containerfile resolve against the CONTEXT, not
+# against the Containerfile's own directory. A Containerfile that lives in a
+# subdirectory and copies files next to itself needs that subdirectory as its
+# context.
 #
 # The script constructs the version string using the tag and the current date.
 # If the git working directory is clean, it also includes the short SHA of the current HEAD.
@@ -120,7 +161,7 @@ sudoif command *args:
 #
 
 # Build the image using the specified parameters
-build $target_image=image_name $tag=default_tag $containerfile="Containerfile" $description=image_desc:
+build $target_image=image_name $tag=default_tag $containerfile="Containerfile" $description=image_desc $context=".":
     #!/usr/bin/env bash
 
     set -euox pipefail
@@ -151,7 +192,7 @@ build $target_image=image_name $tag=default_tag $containerfile="Containerfile" $
     # This actually builds the image!
     PODMAN_BUILD_ARGS=("${BUILD_ARGS[@]}" "${LABELS[@]}" --pull=newer --tag "${target_image}:${tag}" --file "${containerfile}")
 
-    podman build "${PODMAN_BUILD_ARGS[@]}" .
+    podman build "${PODMAN_BUILD_ARGS[@]}" "${context}"
 
 # Build the agent sandbox guest image
 #
@@ -159,7 +200,7 @@ build $target_image=image_name $tag=default_tag $containerfile="Containerfile" $
 # inside the microVM. It is never rechunked and never `bootc container lint`ed.
 
 # Example: just build-agent-image almanacos-agent latest
-build-agent-image $target_image=agent_image_name $tag=default_tag: (build target_image tag "agent_image/Containerfile" agent_image_desc)
+build-agent-image $target_image=agent_image_name $tag=default_tag: (build target_image tag "agent_image/Containerfile" agent_image_desc "agent_image")
 
 # Split the image for smaller updates (New)!
 rechunk $target_image=image_name $tag=default_tag:
