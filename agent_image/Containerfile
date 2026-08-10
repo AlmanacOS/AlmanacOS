@@ -47,6 +47,22 @@ RUN printf 'agent:x:1000:1000::/home/agent:/usr/bin/bash\n' >> /etc/passwd \
 ENV NPM_CONFIG_PREFIX=/usr/local
 ENV HOME=/home/agent
 
+# File watching over virtiofs.
+#
+# virtiofs does not propagate fsnotify events — there is no upstream support for
+# it (LWN 874000; the RFC series never merged) — so an inotify watch on
+# /workspace never fires for a change made on the host side. Node's watchers do
+# not error on this, they just never fire, which is the worst shape the bug
+# could take: the agent silently never notices your edit.
+#
+# chokidar and watchpack both have polling fallbacks. Polling a large tree costs
+# more than inotify, which is why nobody defaults to it, but here it is the
+# difference between working and quietly not working. Override per-invocation
+# with `--env CHOKIDAR_USEPOLLING=0` if a particular tree is too big for it.
+ENV CHOKIDAR_USEPOLLING=1
+ENV CHOKIDAR_INTERVAL=1000
+ENV WATCHPACK_POLLING=true
+
 # --- Agents ------------------------------------------------------------------
 #
 # One layer each. The package spec is an ARG as well as the toggle, so a pinned

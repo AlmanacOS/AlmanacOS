@@ -8,16 +8,27 @@
         "  token_vars environment variables forwarded into the guest BY NAME if",
         "             they are set on the host. Never NAME=value: the value would",
         "             land in the wrapper's argv and from there in ps output.",
+        "  cpus       vCPUs for this agent's VM",
+        "  ram_mib    memory for this agent's VM, committed up front at boot",
         "  built      whether agent_image/Containerfile actually installs it.",
         "             This mirrors the WITH_<AGENT> build arg defaults and has to",
-        "             be changed in the same commit that changes them."
+        "             be changed in the same commit that changes them.",
+        "",
+        "cpus/ram_mib here are the wrapper's defaults carried forward, NOT measured",
+        "figures. Phase 2 item 5 produces the real numbers per agent; until someone",
+        "records them, every agent gets the same conservative allocation."
     ],
     "agents": {
         "claude": {
             "description": "Claude Code",
             "command": "claude",
             "package": "@anthropic-ai/claude-code",
-            "token_vars": ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
+            "token_vars": [
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN"
+            ],
+            "cpus": 4,
+            "ram_mib": 8192,
             "built": true
         },
         "opencode": {
@@ -29,6 +40,8 @@
                 "OPENAI_API_KEY",
                 "OPENROUTER_API_KEY"
             ],
+            "cpus": 4,
+            "ram_mib": 8192,
             "built": true
         },
         "pi": {
@@ -36,6 +49,8 @@
             "command": "pi",
             "package": null,
             "token_vars": [],
+            "cpus": 4,
+            "ram_mib": 8192,
             "built": false
         },
         "hermes": {
@@ -43,6 +58,8 @@
             "command": "hermes",
             "package": null,
             "token_vars": [],
+            "cpus": 4,
+            "ram_mib": 8192,
             "built": false
         }
     }

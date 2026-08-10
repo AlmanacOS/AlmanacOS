@@ -37,10 +37,32 @@ IMAGE="${ALMANAC_AGENT_IMAGE:-ghcr.io/clemperorpenguin/almanacos-agent:latest}"
 
 # libkrun's own defaults are 1 GiB of RAM and a cpu count derived from affinity.
 # 1 GiB OOM-kills a coding agent partway through a large edit, which presents as
-# the agent mysteriously dying. These are placeholders until Phase 2 measures
-# real usage.
-CPUS="${ALMANAC_AGENT_CPUS:-4}"
-RAM_MIB="${ALMANAC_AGENT_RAM:-8192}"
+# the agent mysteriously dying rather than as an out-of-memory condition.
+#
+# Sizing resolves in three steps, most specific first: an explicit --cpus/--ram
+# or ALMANAC_AGENT_CPUS/RAM, then the per-agent figures in agents.json, then
+# these. The per-agent layer exists because the agents differ by more than noise
+# and the VM's memory is committed up front — one number for all of them is
+# either wasteful for the small ones or fatal for the large ones.
+readonly DEFAULT_CPUS=4
+readonly DEFAULT_RAM_MIB=8192
+
+CPUS="${ALMANAC_AGENT_CPUS:-}"
+RAM_MIB="${ALMANAC_AGENT_RAM:-}"
+
+# Host environment worth carrying into the VM. Terminal and locale settings
+# because a TUI in a VM with no locale renders box-drawing characters as
+# mojibake; TZ because timestamps in agent output are otherwise UTC with no
+# indication of it. All forwarded by name, and only if actually set on the host.
+readonly PASSTHROUGH_VARS=(
+    COLORTERM
+    LANG
+    LC_ALL
+    LC_CTYPE
+    TZ
+    NO_COLOR
+    FORCE_COLOR
+)
 
 EXTRA_MOUNTS=()
 
@@ -117,6 +139,56 @@ forward_tokens() {
         [[ -n "${!var:-}" ]] || continue
         printf '%s\n' "--env" "$var"
     done < <(registry | jq -r --arg a "$agent" '.agents[$a].token_vars[]? // empty')
+}
+
+# ---------------------------------------------------------------------------
+# Guest environment
+
+# Terminal, locale and timezone, forwarded by name where the host has them.
+forward_passthrough() {
+    local var
+    for var in "${PASSTHROUGH_VARS[@]}"; do
+        [[ -n "${!var:-}" ]] || continue
+        printf '%s\n' "--env" "$var"
+    done
+}
+
+# Git identity.
+#
+# The guest has git but no gitconfig, and the host's is not mounted — mounting
+# it would drag in credential helpers, signing keys and insteadOf rules, which
+# is exactly the sort of ambient authority the sandbox exists to withhold. So an
+# agent asked to commit hits "Please tell me who you are" and, being an agent,
+# tends to respond by inventing an identity or setting a global config.
+#
+# Copy across the two values that are already public in every commit the user
+# has ever pushed, and nothing else. Exported rather than passed as
+# NAME=value so the same by-name rule as tokens holds everywhere and there is
+# no second convention to remember.
+#
+# Unlike the other two, this sets a global rather than printing flags: the
+# exports have to happen in *this* shell to be inherited by podman, and a
+# function whose output is captured with $( ) or < <( ) runs in a subshell whose
+# environment is discarded. Printing `--env GIT_AUTHOR_NAME` from a subshell
+# that also exported it produces a flag naming a variable podman cannot see.
+GIT_FLAGS=()
+setup_git_identity() {
+    local name email
+
+    name=$(git config --get user.name 2>/dev/null) || name=""
+    email=$(git config --get user.email 2>/dev/null) || email=""
+
+    [[ -n "$name" && -n "$email" ]] || return 0
+
+    export GIT_AUTHOR_NAME="$name" GIT_COMMITTER_NAME="$name"
+    export GIT_AUTHOR_EMAIL="$email" GIT_COMMITTER_EMAIL="$email"
+
+    GIT_FLAGS=(
+        --env GIT_AUTHOR_NAME
+        --env GIT_COMMITTER_NAME
+        --env GIT_AUTHOR_EMAIL
+        --env GIT_COMMITTER_EMAIL
+    )
 }
 
 # ---------------------------------------------------------------------------
@@ -200,6 +272,25 @@ cmd_update() {
     podman pull "$IMAGE"
 }
 
+# First run should not be a dead end. The pull is safe to offer because the
+# signature policy gates it — there is no version of this where we fetch
+# something unverified to be helpful.
+ensure_image() {
+    podman image exists "$IMAGE" 2>/dev/null && return 0
+
+    if [[ ! -t 0 ]]; then
+        die "$IMAGE is not present; run \`ujust almanac-update-agent-sandbox\` first"
+    fi
+
+    printf 'The guest image %s is not here yet.\n' "$IMAGE" >&2
+    printf 'It is a few hundred MB and its signature is checked during the pull.\n' >&2
+    read -r -p 'Pull it now? [Y/n] ' reply
+    [[ -z "$reply" || "$reply" =~ ^[Yy]$ ]] ||
+        die "nothing to run without the guest image"
+
+    podman pull "$IMAGE" || die "pull failed; the image is unavailable or unsigned"
+}
+
 cmd_run() {
     local agent="$1"; shift
     require_jq
@@ -227,8 +318,13 @@ cmd_run() {
         die "refusing to mount / as the workspace"
     fi
 
-    podman image exists "$IMAGE" 2>/dev/null ||
-        die "$IMAGE is not present; run \`ujust almanac-update-agent-sandbox\` first"
+    # Sizing: explicit flag, then the agent's own figures, then the defaults.
+    [[ -n "$CPUS" ]] || CPUS=$(agent_field "$agent" cpus)
+    [[ -n "$CPUS" ]] || CPUS=$DEFAULT_CPUS
+    [[ -n "$RAM_MIB" ]] || RAM_MIB=$(agent_field "$agent" ram_mib)
+    [[ -n "$RAM_MIB" ]] || RAM_MIB=$DEFAULT_RAM_MIB
+
+    ensure_image
 
     local tty_flags=()
     if [[ -t 0 && -t 1 ]]; then
@@ -241,6 +337,21 @@ cmd_run() {
         warn "no credentials found in the environment for '$agent'; it may prompt or fail to authenticate"
     fi
 
+    local env_flags=()
+    mapfile -t env_flags < <(forward_passthrough)
+
+    setup_git_identity
+    if (( ${#GIT_FLAGS[@]} == 0 )); then
+        warn "no git user.name/user.email on the host; commits made inside the sandbox will fail"
+    fi
+
+    # Labels, so a VM that outlives its terminal can be found again. There is no
+    # `agentbox exec` to attach with — krun does not implement podman exec
+    # (crun#2090) — so being able to identify and stop one is the whole of the
+    # management story.
+    local name
+    name="agentbox-${agent}-$$"
+
     # `--runtime krun` appears here and nowhere else in the image.
     #
     # No `--device /dev/kvm`: crun's krun handler creates the device node inside
@@ -251,14 +362,38 @@ cmd_run() {
     # the whole of $HOME is refused above.
     exec podman run --rm "${tty_flags[@]}" \
         --runtime krun \
+        --name "$name" \
+        --label almanac.agentbox=1 \
+        --label "almanac.agent=$agent" \
+        --label "almanac.workspace=$project_dir" \
         --annotation krun.cpus="$CPUS" \
         --annotation krun.ram_mib="$RAM_MIB" \
         --volume "$project_dir:/workspace:Z" \
         ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
         --workdir /workspace \
         --env "TERM=${TERM:-xterm-256color}" \
+        ${env_flags[@]+"${env_flags[@]}"} \
+        ${GIT_FLAGS[@]+"${GIT_FLAGS[@]}"} \
         ${token_flags[@]+"${token_flags[@]}"} \
         "$IMAGE" "$guest_cmd" "$@"
+}
+
+cmd_ps() {
+    local out
+    out=$(podman ps \
+        --filter label=almanac.agentbox=1 \
+        --format 'table {{ .Names }}\t{{ index .Labels "almanac.agent" }}\t{{ index .Labels "almanac.workspace" }}\t{{ .Status }}' \
+        2>/dev/null) || die "could not list containers"
+
+    # One header line and nothing else means nothing is running.
+    if [[ $(wc -l <<<"$out") -le 1 ]]; then
+        printf 'No agent sandboxes running.\n'
+        return
+    fi
+    printf '%s\n' "$out"
+    printf '\n'
+    printf 'These are VMs, not containers you can exec into. `podman stop <name>`\n'
+    printf 'shuts one down; there is no way to attach a second shell.\n'
 }
 
 usage() {
@@ -274,10 +409,12 @@ Commands:
   --list, list        Show the known agents and whether the image carries them
   status              Check the runtime, the guest image, and the agents
   update              Pull the latest signed guest image
+  ps                  Show running sandboxes
 
 Options:
-  --cpus N            vCPUs for the VM (default $CPUS)
-  --ram MIB           Memory for the VM in MiB (default $RAM_MIB)
+  --cpus N            vCPUs for the VM. Defaults to the agent's own figure from
+                      the registry, or $DEFAULT_CPUS.
+  --ram MIB           Memory for the VM in MiB. Same fallback, or $DEFAULT_RAM_MIB.
   --mount SRC:DST     Bind another host path into the VM. Repeatable.
                       Every one of these widens the blast radius; the workspace
                       alone is the design.
@@ -286,6 +423,15 @@ Environment:
   ALMANAC_AGENT_IMAGE  Guest image reference (default $IMAGE)
   ALMANAC_AGENT_CPUS   Same as --cpus
   ALMANAC_AGENT_RAM    Same as --ram
+
+Carried into the VM: TERM, COLORTERM, LANG, LC_ALL, LC_CTYPE, TZ, NO_COLOR,
+FORCE_COLOR if set, the agent's credential variables, and git user.name /
+user.email so commits work. Nothing else — not your gitconfig, not your SSH
+agent, not your shell environment.
+
+File watching inside the sandbox polls rather than using inotify, because
+virtiofs does not propagate fsnotify events. Edits you make on the host are
+seen a second or two late; edits the agent makes are seen immediately.
 
 Anything after the agent name is passed through to the agent untouched.
 EOF
@@ -304,6 +450,7 @@ main() {
             --list|list) cmd_list; return ;;
             status) cmd_status; return ;;
             update) cmd_update; return ;;
+            ps) cmd_ps; return ;;
             -h|--help|'') usage; return ;;
             --) shift; break ;;
             -*) die "unknown option $1" ;;

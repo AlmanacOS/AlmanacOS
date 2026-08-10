@@ -332,11 +332,71 @@ fails, stop and revisit the design rather than continuing to Phase 3.
 
 ---
 
-## Phase 3 — Wrapper v1
+## Phase 3 — Wrapper v1  ✅
 
-Ships with Phase 1's `agentbox`; this phase is where it gets exercised and the
-sizing/UX gaps from Phase 2 get closed. Token passing is `--env` by name, which
-per Phase 4 is already the target state rather than a stopgap.
+Phase 1 shipped the skeleton; this closes what Phase 2 exposed. Token passing is
+`--env` by name, which per Phase 4 is already the target state rather than a
+stopgap, so it did not change.
+
+**Sizing is now three-tiered** — `--cpus`/`--ram` or the env vars, then per-agent
+`cpus`/`ram_mib` in `agents.json`, then `DEFAULT_CPUS`/`DEFAULT_RAM_MIB`. The
+per-agent tier exists because the VM commits its memory up front, so a single
+figure across four agents is either wasteful for the small ones or fatal for the
+large ones. **The committed per-agent values are the defaults carried forward,
+not measurements.** Phase 2 item 5 produces real numbers; they go in
+`agents.json` and nowhere else.
+
+**inotify is dead over virtiofs, so watchers poll.** This was the expected Phase
+2 result and it is the one that would otherwise bite silently: node's watchers
+do not error when inotify never fires, they just never fire, so the agent simply
+never notices a host-side edit. The guest image now sets
+`CHOKIDAR_USEPOLLING=1`, `CHOKIDAR_INTERVAL=1000` and `WATCHPACK_POLLING=true`.
+Baked into the image rather than the wrapper because it is a property of the
+filesystem the guest runs on, not of any particular invocation, and overridable
+per-run with `--env CHOKIDAR_USEPOLLING=0` on a tree too large to poll.
+
+**Git identity is forwarded.** The guest has git but no gitconfig, and the
+host's is deliberately not mounted — it carries credential helpers, signing
+keys, and `insteadOf` rules, which is precisely the ambient authority the
+sandbox exists to withhold. But an agent asked to commit then hits "Please tell
+me who you are", and agents respond to that by inventing an identity. Only
+`user.name` and `user.email` cross, as `GIT_AUTHOR_*`/`GIT_COMMITTER_*` — two
+values already public in every commit the user has pushed.
+
+**Terminal and locale cross too**: `COLORTERM`, `LANG`, `LC_ALL`, `LC_CTYPE`,
+`TZ`, `NO_COLOR`, `FORCE_COLOR`, forwarded by name where set. A TUI in a VM with
+no locale renders box-drawing characters as mojibake, and without `TZ` every
+timestamp the agent prints is UTC with nothing saying so.
+
+**`agentbox ps`**, plus `--name` and `almanac.*` labels on every VM. There is no
+`agentbox exec` and never will be (crun#2090), so identifying a sandbox and
+stopping it is the entire management story; being unable to list them made that
+zero.
+
+**First run pulls instead of failing.** `ensure_image` offers the pull when
+interactive and dies with the `ujust` instruction when not. Safe to offer
+because the signature policy gates the pull — there is no path here that fetches
+something unverified in order to be helpful.
+
+One implementation note worth keeping, because it is a trap the whole script's
+by-name convention walks into: `setup_git_identity` sets a global array rather
+than printing flags like its neighbours. The `export` has to happen in the
+wrapper's own shell for podman to inherit it, and a function whose output is
+captured by `< <( )` runs in a subshell whose environment is discarded — so
+printing `--env GIT_AUTHOR_NAME` from a subshell that also exported it yields a
+flag naming a variable podman cannot see.
+
+### Verified how
+
+By dry run with stubbed `podman` and `jq`, on the assembled argv: sizing
+precedence, per-agent fallback, credential forwarding, unknown/unbuilt agent
+refusal, `$HOME` refusal, and passthrough of trailing agent arguments. The
+security property that matters — the token appearing as `--env ANTHROPIC_API_KEY`
+and the value appearing nowhere in argv — is checked directly.
+
+Still unverified, and only Phase 2 hardware can settle it: whether the polling
+interval is tolerable on a large repository, and whether the per-agent sizing
+defaults are anywhere near right.
 
 ---
 
