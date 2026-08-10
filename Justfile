@@ -9,6 +9,11 @@ export image_logo_url := env_var("IMAGE_LOGO_URL")
 export default_tag := env_var("DEFAULT_TAG")
 export bib_image := env_var("BIB_IMAGE")
 
+# The agent sandbox guest image, built from agent_image/Containerfile.
+# Lowercased because OCI repository names must be lowercase and IMAGE_NAME is not.
+export agent_image_name := lowercase(env_var("IMAGE_NAME")) + "-agent"
+export agent_image_desc := "AlmanacOS agent sandbox guest image"
+
 alias build-vm := build-qcow2
 alias rebuild-vm := rebuild-qcow2
 alias run-vm := run-vm-qcow2
@@ -80,6 +85,8 @@ sudoif command *args:
 # Arguments:
 #   $target_image - The tag you want to apply to the image (default: $image_name).
 #   $tag - The tag for the image (default: $default_tag).
+#   $containerfile - The Containerfile to build (default: Containerfile).
+#   $description - The image description label (default: $image_desc).
 #
 # The script constructs the version string using the tag and the current date.
 # If the git working directory is clean, it also includes the short SHA of the current HEAD.
@@ -93,7 +100,7 @@ sudoif command *args:
 #
 
 # Build the image using the specified parameters
-build $target_image=image_name $tag=default_tag:
+build $target_image=image_name $tag=default_tag $containerfile="Containerfile" $description=image_desc:
     #!/usr/bin/env bash
 
     set -euox pipefail
@@ -117,14 +124,22 @@ build $target_image=image_name $tag=default_tag:
     LABELS+=("--label" "io.artifacthub.package.logo-url={{ image_logo_url }}")
     LABELS+=("--label" "io.artifacthub.package.prerelease=false")
     LABELS+=("--label" "org.opencontainers.image.created=$(date -u +%Y\-%m\-%d\T%H\:%M\:%S\Z)")
-    LABELS+=("--label" "org.opencontainers.image.description={{ image_desc }}")
-    LABELS+=("--label" "org.opencontainers.image.title={{ image_name }}")
+    LABELS+=("--label" "org.opencontainers.image.description=${description}")
+    LABELS+=("--label" "org.opencontainers.image.title=${target_image}")
     LABELS+=("--label" "org.opencontainers.image.vendor={{ repo_organization }}")
 
     # This actually builds the image!
-    PODMAN_BUILD_ARGS=("${BUILD_ARGS[@]}" "${LABELS[@]}" --pull=newer --tag "${target_image}:${tag}" --file Containerfile)
+    PODMAN_BUILD_ARGS=("${BUILD_ARGS[@]}" "${LABELS[@]}" --pull=newer --tag "${target_image}:${tag}" --file "${containerfile}")
 
     podman build "${PODMAN_BUILD_ARGS[@]}" .
+
+# Build the agent sandbox guest image
+#
+# This is a plain OCI image, not a bootc image: it is the rootfs krun boots
+# inside the microVM. It is never rechunked and never `bootc container lint`ed.
+
+# Example: just build-agent-image almanacos-agent latest
+build-agent-image $target_image=agent_image_name $tag=default_tag: (build target_image tag "agent_image/Containerfile" agent_image_desc)
 
 # Split the image for smaller updates (New)!
 rechunk $target_image=image_name $tag=default_tag:
@@ -230,6 +245,15 @@ image_name $target_image=image_name:
     set -eoux pipefail
 
     echo "${image_name}"
+
+# Agent Image Name
+[group('Utility')]
+[private]
+agent_image_name:
+    #!/usr/bin/env bash
+    set -eoux pipefail
+
+    echo "${agent_image_name}"
 
 # Command: _rootful_load_image
 # Description: This script checks if the current user is root or running under sudo. If not, it attempts to resolve the image tag using podman inspect.
