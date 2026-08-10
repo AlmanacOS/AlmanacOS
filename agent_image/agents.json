@@ -1,0 +1,49 @@
+{
+    "_README": [
+        "The agent registry, read by /usr/libexec/almanac-agentbox on the host and",
+        "shipped unchanged into the guest image so the two cannot disagree.",
+        "",
+        "  command    the executable to run inside the microVM",
+        "  package    the npm package that provides it",
+        "  token_vars environment variables forwarded into the guest BY NAME if",
+        "             they are set on the host. Never NAME=value: the value would",
+        "             land in the wrapper's argv and from there in ps output.",
+        "  built      whether agent_image/Containerfile actually installs it.",
+        "             This mirrors the WITH_<AGENT> build arg defaults and has to",
+        "             be changed in the same commit that changes them."
+    ],
+    "agents": {
+        "claude": {
+            "description": "Claude Code",
+            "command": "claude",
+            "package": "@anthropic-ai/claude-code",
+            "token_vars": ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
+            "built": true
+        },
+        "opencode": {
+            "description": "opencode",
+            "command": "opencode",
+            "package": "opencode-ai",
+            "token_vars": [
+                "ANTHROPIC_API_KEY",
+                "OPENAI_API_KEY",
+                "OPENROUTER_API_KEY"
+            ],
+            "built": true
+        },
+        "pi": {
+            "description": "pi (npm package name not yet recorded)",
+            "command": "pi",
+            "package": null,
+            "token_vars": [],
+            "built": false
+        },
+        "hermes": {
+            "description": "hermes (npm package name not yet recorded)",
+            "command": "hermes",
+            "package": null,
+            "token_vars": [],
+            "built": false
+        }
+    }
+}

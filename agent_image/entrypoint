@@ -1,0 +1,68 @@
+#!/usr/bin/bash
+# agent-entrypoint — PID 1 inside the agent sandbox microVM.
+#
+# libkrun boots this image's rootfs as a VM and runs this script as the init
+# process. There is no service manager underneath it: when this exits, the VM
+# powers off. Everything it does happens once, before the agent starts.
+#
+# Its one real job is dropping privilege. The VM boots as root no matter what
+# the image says — crun's krun handler never reads the OCI process.user and
+# never calls krun_setuid — so a `USER` line in the Containerfile buys nothing
+# and this has to be done from inside.
+#
+# That drop is defence in depth, not the containment boundary. The boundary is
+# the VM. Root here is root of a disposable kernel that shares no namespace with
+# the host, and the drop only narrows what a compromised agent can reach *within*
+# that kernel: the rest of the rootfs, the loaded modules, /dev.
+#
+# It is also the part most likely to be wrong, which is why it can be turned off
+# without rebuilding. See podman#28316: bind-mounted volumes have been reported
+# read-only for container users other than root under libkrun. If that
+# reproduces here, /workspace becomes unwritable the moment we drop, and every
+# agent fails in a way that looks like a permissions bug in the agent. The check
+# below exists to name it instead.
+
+set -euo pipefail
+
+readonly AGENT_UID=1000
+readonly AGENT_GID=1000
+readonly WORKSPACE=/workspace
+
+die() { printf 'agent-entrypoint: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'agent-entrypoint: %s\n' "$*" >&2; }
+
+# Would the agent user be able to write the project directory?
+workspace_writable_as_agent() {
+    setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups \
+        -- test -w "$WORKSPACE" 2>/dev/null
+}
+
+main() {
+    [[ $# -gt 0 ]] || die "no command given; the host wrapper should pass one"
+
+    [[ -d "$WORKSPACE" ]] ||
+        die "$WORKSPACE is not mounted; the host wrapper should bind the project directory"
+
+    # Set unconditionally: agents write config and caches here, and inheriting
+    # root's HOME after the drop would send them somewhere unwritable.
+    export HOME=/home/agent
+
+    if [[ "${ALMANAC_AGENT_NO_DROP:-0}" == "1" ]]; then
+        warn "ALMANAC_AGENT_NO_DROP=1 — running as root inside the VM"
+        exec "$@"
+    fi
+
+    if ! workspace_writable_as_agent; then
+        warn "$WORKSPACE is not writable as uid $AGENT_UID, only as root."
+        warn "This is the failure mode described in podman#28316. The agent would"
+        warn "start and then be unable to edit anything it was asked to edit."
+        warn "Staying root inside the VM so the sandbox is still usable; the VM"
+        warn "boundary is unaffected. If you see this, record it against the"
+        warn "Phase 2 gate rather than working around it here."
+        exec "$@"
+    fi
+
+    exec setpriv --reuid="$AGENT_UID" --regid="$AGENT_GID" --clear-groups -- "$@"
+}
+
+main "$@"

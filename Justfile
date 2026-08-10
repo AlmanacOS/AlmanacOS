@@ -32,6 +32,26 @@ check:
     done
     echo "Checking syntax: Justfile"
     just --unstable --fmt --check -f Justfile
+    just check-krun-not-default
+
+# Refuse to ship krun as podman's default runtime
+#
+# Setting `runtime = "krun"` in containers.conf is the tempting one-line version
+# of the agent sandbox, and it breaks the image: distrobox and toolbox both
+# `enter` via `podman exec`, and krun does not implement exec (crun#2090). The
+# runtime belongs on the individual `podman run` in almanac-agentbox and nowhere
+# else, so guard the shortcut rather than trusting everyone to remember.
+[group('Just')]
+check-krun-not-default:
+    #!/usr/bin/bash
+    set -euo pipefail
+    if grep -rniE '^[^#]*runtime[[:space:]]*=[[:space:]]*"?krun' \
+        system_files/ build_files/ 2>/dev/null; then
+        echo "ERROR: krun is being set as a default runtime (see above)." >&2
+        echo "This breaks 'distrobox enter' and 'toolbox enter' image-wide." >&2
+        exit 1
+    fi
+    echo "OK: krun is not configured as a default runtime"
 
 # Fix Just Syntax
 [group('Just')]

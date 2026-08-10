@@ -74,7 +74,12 @@ the entire interactive-wrapper UX if it reproduces.
 
 ## Phase 1 — Get it into the image
 
-### 1a. Host runtime — `build_files/build.sh`
+**Status: implemented.** Every subsection below is landed except where it says
+otherwise. What is *not* verified is anything requiring the image to be built
+and booted — that is Phase 2, and it is where the two open podman bugs get
+answered.
+
+### 1a. Host runtime — `build_files/build.sh`  ✅
 
 Add to the Fedora-repo install section (`crun-krun` and `libkrun` are both in
 `updates`, so no COPR sandwich is needed):
@@ -87,11 +92,19 @@ Add to the Fedora-repo install section (`crun-krun` and `libkrun` are both in
 dnf5 install -y crun-krun libkrun
 ```
 
-Then extend the existing chmod block:
+`jq` goes in the same line — it is what `almanac-agentbox` reads the agent
+registry with.
 
-```bash
-chmod +x /usr/libexec/almanac-agentbox
-```
+`build.sh` also now:
+
+- installs `agent_image/agents.json` to `/usr/share/almanac/agents.json`, so the
+  host registry and the guest registry are the same file rather than two files
+  that agree today. This needed one line in the root `Containerfile` to put
+  `agent_image/` into the build context stage.
+- merges the signature policy fragment (1f) into the base image's
+  `policy.json`.
+- `chmod +x /usr/libexec/almanac-agentbox` and symlinks it to
+  `/usr/bin/agentbox`.
 
 **Do not** create `/etc/containers/containers.conf`, and do not set
 `runtime = "krun"` anywhere. §3.1 is load-bearing: a global default would break
@@ -99,7 +112,7 @@ chmod +x /usr/libexec/almanac-agentbox
 `podman exec` and krun does not implement exec (crun#2090). Guard it with a CI
 check — see 1d.
 
-### 1b. Guest image — new `agent_image/` directory
+### 1b. Guest image — new `agent_image/` directory  ✅
 
 ```
 agent_image/
@@ -109,12 +122,26 @@ agent_image/
 └── agents.json            # registry: name → guest command + description
 ```
 
-`Containerfile` shape — `FROM fedora-minimal`, `microdnf install nodejs npm
-git ca-certificates`, then one `RUN npm install -g` layer **per agent**, each
-guarded by an `ARG WITH_<AGENT>=1`. That is what "shared now, structured to
-split later" buys: building a claude-only image is
-`--build-arg WITH_OPENCODE=0 ...`, not a rewrite. No sudo, no passwd tooling, no
-distrobox-init — §4.3's whole point.
+`Containerfile` — `FROM registry.fedoraproject.org/fedora-minimal:43`,
+`microdnf install nodejs npm git ca-certificates util-linux-core`, then one
+`RUN npm install -g` layer **per agent**, each guarded by an `ARG
+WITH_<AGENT>` *and* an `ARG <AGENT>_PACKAGE`. That is what "shared now,
+structured to split later" buys: a claude-only image is
+`--build-arg WITH_OPENCODE=0`, and pinning a version is
+`--build-arg CLAUDE_PACKAGE=@anthropic-ai/claude-code@1.2.3`. Neither is a
+rewrite.
+
+No sudo, no distrobox-init, and no shadow-utils — §4.3's whole point. The
+`agent` user is created by appending to `/etc/passwd` and `/etc/group`
+directly, because an image that carries `useradd` hands a compromised agent a
+way to make itself a second account.
+
+**`pi` and `hermes` are `WITH_*=0` by default.** Their npm package names are
+recorded nowhere in this repo and I will not guess one — a wrong guess ships an
+image whose `pi` is somebody else's package. Set `PI_PACKAGE` / `HERMES_PACKAGE`
+and flip the toggle, in the same commit that flips `"built": true` in
+`agents.json`. The build fails loudly if a toggle is on with an empty package
+rather than producing an image that is quietly missing an agent.
 
 `krun_vm.json` → **`/.krun_vm.json` at the rootfs root** (crun's
 `KRUN_VM_FILE` constant; opened `O_NOFOLLOW`, so it must be a real file, not a
@@ -142,7 +169,7 @@ maintainer statement confirms it. The entrypoint `exec setpriv --reuid=agent
 the read-only-volume bug**; write it so the drop can be disabled by an env var
 while that is being tested.
 
-### 1c. Host entry point
+### 1c. Host entry point  ✅
 
 Following the repo's existing split — logic in `libexec`, thin name in `bin`:
 
@@ -233,49 +260,48 @@ can be built until this exists. What shipped:
 - `just check` runs `just --unstable --fmt --check` over every `*.just` in the
   tree, so the new recipes must be fmt-clean or CI fails at the first step.
 
-### 1e. ujust recipes — `system_files/usr/share/ublue-os/just/60-almanac.just`
+### 1e. ujust recipes — `system_files/usr/share/ublue-os/just/60-almanac.just`  ✅
 
 Append, matching the existing `[group('Almanac')]` / quoted-`{{ }}` style:
 
-```just
-# Show sandbox status: krun runtime, /dev/kvm access, agent image, signature
-[group('Almanac')]
-almanac-agent-status:
-    @/usr/libexec/almanac-agentbox status
+Three recipes landed — `almanac-list-agents`, `almanac-agent-status`, and
+`almanac-update-agent-sandbox`. The `almanac-agent-login` and
+`almanac-agent-egress` recipes sketched in earlier drafts are **deliberately
+held back** to Phases 4 and 5: a `ujust` entry that prints "not implemented yet"
+is worse than no entry, because it advertises a control the sandbox does not
+actually have.
 
-# Pull the latest signed agent sandbox image
-[group('Almanac')]
-almanac-update-agent-sandbox:
-    @/usr/libexec/almanac-agentbox update
+Running an agent is not a `ujust` recipe. `ujust` cannot forward arbitrary
+trailing arguments cleanly, and agents take a lot of them. `agentbox <agent>
+[args...]` on `PATH` is the interface.
 
-# Log in to an agent on the host, where a browser exists
-[group('Almanac')]
-almanac-agent-login agent:
-    @/usr/libexec/almanac-agentbox login "{{ agent }}"
+### 1f. Image signature verification  ✅
 
-# Show or edit the sandbox egress allowlist
-[group('Almanac')]
-almanac-agent-egress action="show" host="":
-    @/usr/libexec/almanac-agentbox egress "{{ action }}" "{{ host }}"
-```
-
-### 1f. Image signature verification
-
-The repo signs images but ships no verification policy — there is no
-`/etc/containers/policy.json` and no `/etc/pki/containers/`. Rather than
-requiring the `cosign` binary at runtime (not in the base image), ship:
+The repo signs images but shipped no verification policy. Rather than requiring
+the `cosign` binary at runtime — it is not in the base image — verification
+happens at pull time via three pieces:
 
 - `system_files/etc/pki/containers/almanacos.pub` — a copy of the repo's
-  `cosign.pub`
-- `system_files/etc/containers/registries.d/ghcr.io.yaml` — points at the
-  sigstore attachment
-- a `policy.json` scope for `ghcr.io/clemperorpenguin/almanacos-agent` requiring
-  `sigstoreSigned` against that key
+  `cosign.pub`.
+- `system_files/etc/containers/registries.d/ghcr.io.yaml` — sets
+  `use-sigstore-attachments: true` for `ghcr.io/clemperorpenguin`. Without this
+  the stack never looks for the `sha256-<digest>.sig` artifact cosign pushes,
+  and every pull fails with "missing signature" while the signature sits in the
+  registry untouched.
+- `system_files/usr/share/almanac/agent-policy.json` — a **fragment**, merged
+  into the base image's `/etc/containers/policy.json` by `build.sh` rather than
+  replacing it. This is the one departure from the earlier draft: shipping a
+  `policy.json` in `system_files/` would clobber whatever ublue and Fedora put
+  there, silently changing how every unrelated pull on the system is verified.
+  The merge preserves existing transports and adds one scope.
 
-Then `podman pull` enforces the signature itself and
-`almanac-update-agent-sandbox` needs no extra verification logic. Set the scope
-narrowly — a `default: reject` policy would break every other pull on the
-system.
+Scope is a single repository. A `default: reject` policy, or a broader scope,
+would break Flatpak runtimes, toolbox images, and bootc's own pull of the OS
+image, none of which are signed with this key.
+
+`podman pull` then enforces the signature itself, so
+`almanac-update-agent-sandbox` needs no verification logic of its own: a pull
+that succeeds is a pull that was signed.
 
 ---
 

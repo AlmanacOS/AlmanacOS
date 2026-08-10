@@ -1,0 +1,10 @@
+# Where to look for the signatures on images we publish.
+#
+# cosign does not push signatures into the manifest; it attaches them as a
+# separate OCI artifact tagged sha256-<digest>.sig alongside the image. The
+# containers stack only goes looking for that attachment if it is told to, and
+# without this file the sigstoreSigned rule in policy.json would fail every pull
+# with "missing signature" even when the signature is sitting right there.
+docker:
+    ghcr.io/clemperorpenguin:
+        use-sigstore-attachments: true

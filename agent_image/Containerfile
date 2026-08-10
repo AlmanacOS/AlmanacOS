@@ -1,0 +1,108 @@
+# AlmanacOS agent sandbox — guest rootfs
+#
+# This is not a bootc image and never boots on hardware. It is the root
+# filesystem krun hands to libkrun as the microVM's disk: `podman run --runtime
+# krun` starts a VM whose PID 1 is this image's entrypoint. There is no init, no
+# systemd, no sshd — the VM lives exactly as long as the agent process does.
+#
+# Kept deliberately thin. Everything installed here is reachable by an agent
+# that gets compromised, so the image carries no sudo, no package manager
+# credentials, no host tooling, and no way to become root that root does not
+# already have.
+#
+# "Shared now, structured to split later": every agent is a separate ARG-guarded
+# RUN layer, so building a single-agent image is a matter of build args rather
+# than a rewrite —
+#
+#   podman build --build-arg WITH_OPENCODE=0 --build-arg WITH_CLAUDE=1 ...
+
+FROM registry.fedoraproject.org/fedora-minimal:43
+
+# util-linux-core is for setpriv, which the entrypoint uses to drop privilege.
+# git is here because every one of these agents shells out to it.
+RUN microdnf install -y --setopt=install_weak_deps=0 \
+        nodejs \
+        npm \
+        git \
+        ca-certificates \
+        util-linux-core \
+    && microdnf clean all \
+    && rm -rf /var/cache/dnf
+
+# The unprivileged user the entrypoint drops to. Created by hand rather than
+# with useradd so that shadow-utils never enters the image: an agent that can
+# run useradd can create itself a second account, and nothing here needs to.
+#
+# UID 1000 is not arbitrary — it is the first uid podman maps for a rootless
+# user, so files the agent writes to /workspace stand the best chance of coming
+# back to the host owned by the invoking user.
+RUN printf 'agent:x:1000:1000::/home/agent:/usr/bin/bash\n' >> /etc/passwd \
+    && printf 'agent:x:1000:\n' >> /etc/group \
+    && mkdir -p /home/agent /workspace \
+    && chown 1000:1000 /home/agent /workspace \
+    && chmod 0755 /home/agent
+
+# npm's global prefix, set so the agents land somewhere the unprivileged user
+# can read and nowhere it can write.
+ENV NPM_CONFIG_PREFIX=/usr/local
+ENV HOME=/home/agent
+
+# --- Agents ------------------------------------------------------------------
+#
+# One layer each. The package spec is an ARG as well as the toggle, so a pinned
+# version can be built without editing this file:
+#
+#   --build-arg CLAUDE_PACKAGE=@anthropic-ai/claude-code@1.2.3
+
+ARG WITH_CLAUDE=1
+ARG CLAUDE_PACKAGE=@anthropic-ai/claude-code
+RUN if [ "${WITH_CLAUDE}" = "1" ]; then \
+        npm install -g "${CLAUDE_PACKAGE}" && npm cache clean --force; \
+    fi
+
+ARG WITH_OPENCODE=1
+ARG OPENCODE_PACKAGE=opencode-ai
+RUN if [ "${WITH_OPENCODE}" = "1" ]; then \
+        npm install -g "${OPENCODE_PACKAGE}" && npm cache clean --force; \
+    fi
+
+# pi and hermes are off by default because their npm package names are not
+# recorded anywhere in this repo and guessing one would ship a broken image.
+# Set the package and flip the toggle in the same commit.
+ARG WITH_PI=0
+ARG PI_PACKAGE=
+RUN if [ "${WITH_PI}" = "1" ]; then \
+        [ -n "${PI_PACKAGE}" ] || { echo "WITH_PI=1 but PI_PACKAGE is empty" >&2; exit 1; }; \
+        npm install -g "${PI_PACKAGE}" && npm cache clean --force; \
+    fi
+
+ARG WITH_HERMES=0
+ARG HERMES_PACKAGE=
+RUN if [ "${WITH_HERMES}" = "1" ]; then \
+        [ -n "${HERMES_PACKAGE}" ] || { echo "WITH_HERMES=1 but HERMES_PACKAGE is empty" >&2; exit 1; }; \
+        npm install -g "${HERMES_PACKAGE}" && npm cache clean --force; \
+    fi
+
+# --- Sandbox plumbing --------------------------------------------------------
+
+# krun reads this from the rootfs root. The constant is KRUN_VM_FILE in crun,
+# opened O_NOFOLLOW relative to the rootfs, so it has to be a real file at
+# exactly this path — a symlink is silently ignored. Note that the keys here are
+# bare (`cpus`, `ram_mib`) while the equivalent OCI annotations are prefixed
+# (`krun.cpus`); annotations passed by the host wrapper win over this file.
+COPY krun_vm.json /.krun_vm.json
+
+# The same registry the host wrapper reads, shipped into the guest so the two
+# cannot disagree about which agents exist.
+COPY agents.json /usr/share/almanac/agents.json
+
+COPY entrypoint /usr/local/bin/agent-entrypoint
+RUN chmod 0755 /usr/local/bin/agent-entrypoint \
+    && chmod 0644 /.krun_vm.json /usr/share/almanac/agents.json
+
+WORKDIR /workspace
+
+# No USER directive. The VM boots as root regardless — crun's krun handler never
+# reads process.user and never calls krun_setuid — so the drop is the
+# entrypoint's job and a USER line here would only be misleading.
+ENTRYPOINT ["/usr/local/bin/agent-entrypoint"]

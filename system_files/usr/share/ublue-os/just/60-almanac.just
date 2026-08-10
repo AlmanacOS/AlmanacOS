@@ -1,8 +1,8 @@
-# AlmanacOS — memory tuning and offline model import
+# AlmanacOS — memory tuning, offline model import, and the agent sandbox
 #
 # Installs to /usr/share/ublue-os/just/60-almanac.just
-# Logic lives in /usr/libexec/almanac-memory and /usr/libexec/almanac-models so
-# it can be tested outside the image.
+# Logic lives in /usr/libexec/almanac-memory, /usr/libexec/almanac-models and
+# /usr/libexec/almanac-agentbox so it can be tested outside the image.
 
 # Show GPU topology and the current TTM system-memory cap
 [group('Almanac')]
@@ -38,4 +38,19 @@ almanac-import-models drive="":
 [group('Almanac')]
 almanac-trust-model-key keyfile:
     @/usr/libexec/almanac-models trust-key "{{ keyfile }}"
+
+# List the coding agents the sandbox knows about, and which are in the image
+[group('Almanac')]
+almanac-list-agents:
+    @/usr/libexec/almanac-agentbox --list
+
+# Check the sandbox: krun runtime, /dev/kvm, guest image, available agents
+[group('Almanac')]
+almanac-agent-status:
+    @/usr/libexec/almanac-agentbox status
+
+# Pull the latest signed agent sandbox guest image
+[group('Almanac')]
+almanac-update-agent-sandbox:
+    @/usr/libexec/almanac-agentbox update
 

@@ -2,6 +2,9 @@
 FROM scratch AS ctx
 COPY build_files /
 COPY system_files /system_files
+# The agent sandbox's guest image is built separately, but build.sh takes the
+# agent registry from here so the host and the guest cannot drift apart.
+COPY agent_image /agent_image
 
 # Base Image
 FROM ghcr.io/ublue-os/kinoite-main:latest

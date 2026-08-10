@@ -17,11 +17,9 @@ on:
       - 'Justfile'
       - 'image-template.env'
       - '.github/workflows/build-agent.yml'
+  schedule:
+    - cron: '25 10 * * *'  # 10:25am UTC everyday, after the OS image build
   workflow_dispatch:
-  # TODO: add a `schedule:` trigger once agent_image/Containerfile exists, so the
-  # image picks up npm releases of the agents. It is deliberately absent until
-  # then: `schedule` ignores `paths` filters and would fail nightly on a missing
-  # Containerfile.
 
 env:
   IMAGE_REGISTRY: "ghcr.io/${{ github.repository_owner }}"  # do not edit

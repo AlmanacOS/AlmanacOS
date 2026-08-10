@@ -1,0 +1,318 @@
+#!/usr/bin/bash
+# almanac-agentbox — run a coding agent inside a microVM instead of on the host.
+#
+# Coding agents read and write arbitrary files, run arbitrary commands, and act
+# on text fetched from the network. Containers do not contain that: a container
+# escape is a kernel bug away, and the agent shares the host kernel. This runs
+# them under krun instead, so the agent gets its own kernel and the boundary is
+# hardware virtualisation rather than namespaces.
+#
+#   podman run --runtime krun   ->  crun sees run.oci.handler=krun
+#                               ->  crun dlopen()s libkrun.so.1
+#                               ->  libkrun boots a VM whose disk is the image
+#
+# What the agent can reach, and nothing else:
+#   - the project directory, bind-mounted at /workspace
+#   - whatever credentials are forwarded by name (see forward_tokens)
+#   - the network, until Phase 5 lands the egress allowlist
+#
+# Deliberately NOT set: `runtime = "krun"` in containers.conf. Making krun the
+# global default is the tempting one-line version of this script and it breaks
+# the system — distrobox and toolbox both work by `podman exec`, and krun does
+# not implement exec (crun#2090). `enter` would stop working image-wide. The
+# runtime is selected here, per invocation, and `just check` greps for anyone
+# who tries the shortcut.
+#
+# There is no warm pool and no `agentbox exec` for the same reason: you cannot
+# get a second shell into a running krun VM. One VM, one agent, one lifetime.
+
+set -euo pipefail
+
+readonly REGISTRY_FILE=/usr/share/almanac/agents.json
+
+# The signed guest rootfs. Verified at pull time by the sigstoreSigned policy in
+# /etc/containers/policy.json, not by a cosign binary at runtime — cosign is not
+# in the image.
+IMAGE="${ALMANAC_AGENT_IMAGE:-ghcr.io/clemperorpenguin/almanacos-agent:latest}"
+
+# libkrun's own defaults are 1 GiB of RAM and a cpu count derived from affinity.
+# 1 GiB OOM-kills a coding agent partway through a large edit, which presents as
+# the agent mysteriously dying. These are placeholders until Phase 2 measures
+# real usage.
+CPUS="${ALMANAC_AGENT_CPUS:-4}"
+RAM_MIB="${ALMANAC_AGENT_RAM:-8192}"
+
+EXTRA_MOUNTS=()
+
+die() { printf 'almanac-agentbox: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'almanac-agentbox: %s\n' "$*" >&2; }
+
+require_jq() {
+    command -v jq >/dev/null 2>&1 ||
+        die "jq is not installed; this image should carry it"
+}
+
+# ---------------------------------------------------------------------------
+# The agent registry
+
+registry() {
+    [[ -r "$REGISTRY_FILE" ]] || die "no agent registry at $REGISTRY_FILE"
+    cat "$REGISTRY_FILE"
+}
+
+# Note the long way round instead of `// empty`: jq's alternative operator
+# treats `false` as absent, so `built: false` would come back as the empty
+# string and read as "no such field" rather than "not built".
+agent_field() {
+    local agent="$1" field="$2"
+    registry | jq -r --arg a "$agent" --arg f "$field" \
+        '.agents[$a][$f] | if . == null then empty else . end'
+}
+
+agent_exists() {
+    local agent="$1"
+    [[ -n "$(registry | jq -r --arg a "$agent" '.agents[$a] // empty')" ]]
+}
+
+agent_names() {
+    registry | jq -r '.agents | keys[]'
+}
+
+# ---------------------------------------------------------------------------
+# Preconditions
+
+# krun is a symlink to crun; the handler is compiled into stock crun and
+# dlopen()s libkrun.so.1 at runtime. Missing either one fails deep inside podman
+# with a message that does not mention krun at all, so check up front.
+have_runtime() { command -v krun >/dev/null 2>&1; }
+have_libkrun() { ldconfig -p 2>/dev/null | grep -q 'libkrun\.so\.1'; }
+have_kvm() { [[ -r /dev/kvm && -w /dev/kvm ]]; }
+
+check_preconditions() {
+    have_runtime ||
+        die "no krun runtime; the image should install crun-krun"
+    have_libkrun ||
+        die "libkrun.so.1 is not installed; crun's krun handler cannot load"
+    have_kvm ||
+        die "no read/write access to /dev/kvm; is this machine virtualised, or are you outside the kvm group?"
+}
+
+# ---------------------------------------------------------------------------
+# Credentials
+#
+# Tokens are forwarded BY NAME. `--env ANTHROPIC_API_KEY` tells podman to copy
+# the value out of this process's environment; `--env ANTHROPIC_API_KEY=sk-...`
+# would put the secret in this script's argv, where any user on the machine can
+# read it out of ps. The difference matters and is easy to undo by accident.
+#
+# This is process hygiene, not containment. The agent needs the token to do its
+# job, so a compromised agent has the token by construction — no transport fixes
+# that. The mitigation that works is the shape of the credential: short-lived,
+# narrowly scoped, revocable. Phase 4 is about issuing those, not about moving
+# this one somewhere cleverer.
+forward_tokens() {
+    local agent="$1" var
+    while read -r var; do
+        [[ -n "$var" ]] || continue
+        [[ -n "${!var:-}" ]] || continue
+        printf '%s\n' "--env" "$var"
+    done < <(registry | jq -r --arg a "$agent" '.agents[$a].token_vars[]? // empty')
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+
+cmd_list() {
+    require_jq
+    local name built desc pkg
+    printf '%-12s %-8s %s\n' AGENT IN-IMAGE DESCRIPTION
+    while read -r name; do
+        built=$(agent_field "$name" built)
+        desc=$(agent_field "$name" description)
+        pkg=$(agent_field "$name" package)
+        [[ "$built" == "true" ]] && built=yes || built=no
+        printf '%-12s %-8s %s\n' "$name" "$built" "$desc"
+        if [[ -n "$pkg" ]]; then
+            printf '%-12s %-8s   %s\n' "" "" "$pkg"
+        fi
+    done < <(agent_names)
+    printf '\n'
+    printf 'Image: %s\n' "$IMAGE"
+}
+
+cmd_status() {
+    require_jq
+
+    printf 'Runtime\n'
+    if have_runtime; then
+        printf '  krun            %s\n' "$(command -v krun)"
+    else
+        printf '  krun            MISSING (install crun-krun)\n'
+    fi
+    if have_libkrun; then
+        printf '  libkrun.so.1    present\n'
+    else
+        printf '  libkrun.so.1    MISSING (crun cannot load the handler)\n'
+    fi
+    if have_kvm; then
+        printf '  /dev/kvm        read/write\n'
+    else
+        printf '  /dev/kvm        NOT USABLE\n'
+    fi
+
+    # Catch the mistake this whole design is arranged to avoid.
+    if podman info --format '{{ .Host.OCIRuntime.Name }}' 2>/dev/null | grep -qx krun; then
+        printf '\n'
+        printf '  WARNING: krun is podman'"'"'s DEFAULT runtime on this system.\n'
+        printf '  That breaks `distrobox enter` and `toolbox enter`, which are\n'
+        printf '  podman exec, and krun does not implement exec. Remove the\n'
+        printf '  runtime= line from containers.conf; agentbox selects krun itself.\n'
+    fi
+
+    printf '\nGuest image\n'
+    printf '  reference       %s\n' "$IMAGE"
+    if podman image exists "$IMAGE" 2>/dev/null; then
+        printf '  local           %s\n' \
+            "$(podman image inspect --format '{{ .Digest }}' "$IMAGE" 2>/dev/null)"
+        printf '  built           %s\n' \
+            "$(podman image inspect --format '{{ index .Config.Labels "org.opencontainers.image.created" }}' "$IMAGE" 2>/dev/null)"
+    else
+        printf '  local           not pulled yet — run `ujust almanac-update-agent-sandbox`\n'
+    fi
+
+    printf '\nAgents\n'
+    local name built
+    while read -r name; do
+        built=$(agent_field "$name" built)
+        [[ "$built" == "true" ]] && built="in image" || built="not built"
+        printf '  %-12s  %s\n' "$name" "$built"
+    done < <(agent_names)
+}
+
+# Pulling is what enforces the signature. policy.json requires a sigstore
+# signature by /etc/pki/containers/almanacos.pub for this repository, so a pull
+# that succeeds is a pull that was signed; there is nothing extra to verify
+# afterwards and no cosign binary needed.
+cmd_update() {
+    printf 'Pulling %s\n' "$IMAGE"
+    printf 'The signature is checked by containers-policy(5) during the pull;\n'
+    printf 'if it fails, the pull fails and nothing is written.\n\n'
+    podman pull "$IMAGE"
+}
+
+cmd_run() {
+    local agent="$1"; shift
+    require_jq
+    check_preconditions
+
+    agent_exists "$agent" ||
+        die "unknown agent '$agent'; try: almanac-agentbox --list"
+
+    [[ "$(agent_field "$agent" built)" == "true" ]] ||
+        die "'$agent' is in the registry but not built into the image; see agent_image/Containerfile"
+
+    local guest_cmd
+    guest_cmd=$(agent_field "$agent" command)
+    [[ -n "$guest_cmd" ]] || die "registry entry for '$agent' has no command"
+
+    local project_dir
+    project_dir=$(pwd -P)
+    [[ -d "$project_dir" ]] || die "cannot resolve the current directory"
+
+    # Refusing to sandbox the whole home directory is the point of sandboxing.
+    if [[ "$project_dir" == "$HOME" ]]; then
+        die "refusing to mount all of $HOME as the workspace; cd into a project first"
+    fi
+    if [[ "$project_dir" == "/" ]]; then
+        die "refusing to mount / as the workspace"
+    fi
+
+    podman image exists "$IMAGE" 2>/dev/null ||
+        die "$IMAGE is not present; run \`ujust almanac-update-agent-sandbox\` first"
+
+    local tty_flags=()
+    if [[ -t 0 && -t 1 ]]; then
+        tty_flags=(--interactive --tty)
+    fi
+
+    local token_flags=()
+    mapfile -t token_flags < <(forward_tokens "$agent")
+    if (( ${#token_flags[@]} == 0 )); then
+        warn "no credentials found in the environment for '$agent'; it may prompt or fail to authenticate"
+    fi
+
+    # `--runtime krun` appears here and nowhere else in the image.
+    #
+    # No `--device /dev/kvm`: crun's krun handler creates the device node inside
+    # the container itself, and passing it explicitly conflicts with that.
+    #
+    # :Z relabels the project directory for SELinux. It is destructive on
+    # directories shared with other confined services, which is another reason
+    # the whole of $HOME is refused above.
+    exec podman run --rm "${tty_flags[@]}" \
+        --runtime krun \
+        --annotation krun.cpus="$CPUS" \
+        --annotation krun.ram_mib="$RAM_MIB" \
+        --volume "$project_dir:/workspace:Z" \
+        ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
+        --workdir /workspace \
+        --env "TERM=${TERM:-xterm-256color}" \
+        ${token_flags[@]+"${token_flags[@]}"} \
+        "$IMAGE" "$guest_cmd" "$@"
+}
+
+usage() {
+    cat <<EOF
+Usage: almanac-agentbox [options] <agent> [agent args...]
+       almanac-agentbox <command>
+
+Runs a coding agent inside a krun microVM with the current directory
+bind-mounted at /workspace. The agent gets its own kernel; the host does not
+share one with it.
+
+Commands:
+  --list, list        Show the known agents and whether the image carries them
+  status              Check the runtime, the guest image, and the agents
+  update              Pull the latest signed guest image
+
+Options:
+  --cpus N            vCPUs for the VM (default $CPUS)
+  --ram MIB           Memory for the VM in MiB (default $RAM_MIB)
+  --mount SRC:DST     Bind another host path into the VM. Repeatable.
+                      Every one of these widens the blast radius; the workspace
+                      alone is the design.
+
+Environment:
+  ALMANAC_AGENT_IMAGE  Guest image reference (default $IMAGE)
+  ALMANAC_AGENT_CPUS   Same as --cpus
+  ALMANAC_AGENT_RAM    Same as --ram
+
+Anything after the agent name is passed through to the agent untouched.
+EOF
+}
+
+main() {
+    while [[ $# -gt 0 ]]; do
+        case "${1:-}" in
+            --cpus) CPUS="${2:-}"; shift 2 ;;
+            --ram) RAM_MIB="${2:-}"; shift 2 ;;
+            --mount)
+                [[ -n "${2:-}" ]] || die "--mount needs SRC:DST"
+                EXTRA_MOUNTS+=(--volume "$2:Z")
+                shift 2
+                ;;
+            --list|list) cmd_list; return ;;
+            status) cmd_status; return ;;
+            update) cmd_update; return ;;
+            -h|--help|'') usage; return ;;
+            --) shift; break ;;
+            -*) die "unknown option $1" ;;
+            *) break ;;
+        esac
+    done
+
+    [[ $# -gt 0 ]] || { usage; exit 1; }
+    cmd_run "$@"
+}
+
+main "$@"
