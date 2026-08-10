@@ -30,6 +30,16 @@ set -euo pipefail
 
 readonly REGISTRY_FILE=/usr/share/almanac/agents.json
 
+# Stored credentials. Under $HOME, so they survive `bootc upgrade` without any
+# help — and deliberately not under /var, which bootc treats as image state and
+# `bootc container lint` complains about.
+#
+# This directory is NEVER mounted into a sandbox. The token that a given agent
+# needs is handed to that agent through its environment; no agent ever sees the
+# store, and so no compromised agent can read another agent's credentials or
+# enumerate which ones exist.
+CRED_DIR="${ALMANAC_AGENT_CRED_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/almanac/agent-creds}"
+
 # The signed guest rootfs. Verified at pull time by the sigstoreSigned policy in
 # /etc/containers/policy.json, not by a cosign binary at runtime — cosign is not
 # in the image.
@@ -82,13 +92,15 @@ registry() {
     cat "$REGISTRY_FILE"
 }
 
+# Takes a dotted path, so `credential.env` reaches into the nested record.
+#
 # Note the long way round instead of `// empty`: jq's alternative operator
 # treats `false` as absent, so `built: false` would come back as the empty
 # string and read as "no such field" rather than "not built".
 agent_field() {
     local agent="$1" field="$2"
     registry | jq -r --arg a "$agent" --arg f "$field" \
-        '.agents[$a][$f] | if . == null then empty else . end'
+        '.agents[$a] | getpath($f | split(".")) | if . == null then empty else . end'
 }
 
 agent_exists() {
@@ -139,6 +151,155 @@ forward_tokens() {
         [[ -n "${!var:-}" ]] || continue
         printf '%s\n' "--env" "$var"
     done < <(registry | jq -r --arg a "$agent" '.agents[$a].token_vars[]? // empty')
+}
+
+# --- Stored credentials ----------------------------------------------------
+#
+# What this is for: the agents' interactive logins want a browser, and the
+# sandbox has no browser and no persistent home. Without somewhere to keep the
+# result, every session starts unauthenticated, and the obvious fix — mounting
+# ~/.claude or ~/.local/share/opencode into the guest — hands the agent the
+# whole credential store including whatever else lives in it.
+#
+# So: log in once on the host, keep the token here, hand exactly one token to
+# exactly one agent at run time, by name, through the environment. The store
+# itself never crosses the boundary.
+#
+# What this deliberately does NOT claim to be: protection against a compromised
+# agent. The agent needs the token to work, so it has the token. This is about
+# not giving it *more* than it needs, and about the token being the kind of
+# thing you can revoke — which is why `login` prefers each agent's headless
+# token flow over a permanent account API key where one exists.
+
+cred_file() { printf '%s/%s.json\n' "$CRED_DIR" "$1"; }
+
+cred_env_name() { agent_field "$1" credential.env; }
+
+has_cred() { [[ -f "$(cred_file "$1")" ]]; }
+
+# Sets CRED_FLAGS, and exports the variable it names. A global for the same
+# reason setup_git_identity uses one: the export has to land in this shell.
+CRED_FLAGS=()
+load_cred() {
+    local agent="$1" file var value
+    CRED_FLAGS=()
+
+    var=$(cred_env_name "$agent")
+    [[ -n "$var" ]] || return 0
+
+    # An explicit value in the caller's shell beats the store, and is already
+    # being forwarded by forward_tokens. Loading here too would just duplicate
+    # the flag and quietly override what the operator typed.
+    [[ -z "${!var:-}" ]] || return 0
+
+    file=$(cred_file "$agent")
+    [[ -f "$file" ]] || return 0
+
+    value=$(jq -r '.value // empty' "$file") || die "cannot read $file"
+    [[ -n "$value" ]] || { warn "$file holds no token; ignoring it"; return 0; }
+
+    export "$var=$value"
+    CRED_FLAGS=(--env "$var")
+}
+
+cmd_login() {
+    local agent="${1:-}"
+    require_jq
+
+    [[ -n "$agent" ]] || die "usage: almanac-agentbox login <agent>"
+    agent_exists "$agent" || die "unknown agent '$agent'; try: almanac-agentbox --list"
+
+    local var obtain note file
+    var=$(cred_env_name "$agent")
+    obtain=$(agent_field "$agent" credential.obtain)
+    note=$(agent_field "$agent" credential.note)
+
+    [[ -n "$var" ]] ||
+        die "no credential flow recorded for '$agent' yet; see agent_image/agents.json"
+
+    printf 'Storing a credential for %s as %s\n\n' "$agent" "$var"
+    if [[ -n "$note" ]]; then
+        printf '%s\n\n' "$note"
+    fi
+
+    if [[ -n "$obtain" ]]; then
+        printf 'The token comes from:  %s\n\n' "$obtain"
+        if [[ -t 0 ]]; then
+            read -r -p "Run that in a throwaway sandbox now? [Y/n] " reply
+            if [[ -z "$reply" || "$reply" =~ ^[Yy]$ ]]; then
+                run_login_helper "$agent" "$obtain" || true
+                printf '\n'
+            fi
+        fi
+    fi
+
+    [[ -t 0 ]] || die "login needs a terminal to read the token from"
+
+    local value
+    # -s so the token is not echoed and does not end up in scrollback, and read
+    # rather than an argument so it never appears in argv or shell history.
+    read -r -s -p "Paste the token for $var: " value
+    printf '\n'
+    [[ -n "$value" ]] || die "nothing pasted; nothing stored"
+
+    file=$(cred_file "$agent")
+    (
+        umask 077
+        mkdir -p "$CRED_DIR"
+        jq -n --arg env "$var" --arg value "$value" \
+            --arg stored "$(date -uIseconds)" \
+            '{env: $env, value: $value, stored: $stored}' > "$file"
+    )
+    chmod 0700 "$CRED_DIR"
+    chmod 0600 "$file"
+
+    printf '\nStored in %s (0600).\n' "$file"
+    printf 'It is passed to %s by name at run time and is never mounted into the VM.\n' "$agent"
+    printf 'Revoke it upstream if it leaks; `almanac-agentbox logout %s` only forgets it here.\n' "$agent"
+}
+
+cmd_logout() {
+    local agent="${1:-}" file
+    require_jq
+
+    [[ -n "$agent" ]] || die "usage: almanac-agentbox logout <agent>"
+    file=$(cred_file "$agent")
+
+    [[ -f "$file" ]] || { printf 'No stored credential for %s.\n' "$agent"; return; }
+
+    rm -f "$file"
+    printf 'Forgot the local credential for %s.\n' "$agent"
+    printf '\n'
+    printf 'This does NOT revoke the token — it is still valid upstream until you\n'
+    printf 'revoke it there. If the reason you are here is that it leaked, revoking\n'
+    printf 'it upstream is the step that matters and this was not it.\n'
+}
+
+# Run an agent's token-minting command in a sandbox with no project mounted, so
+# a device-code flow can be completed without the agent being installed on the
+# host. /workspace is a tmpfs: nothing it writes outlives the VM.
+run_login_helper() {
+    local agent="$1" obtain="$2"
+    check_preconditions
+    ensure_image
+
+    local cpus ram
+    cpus=$(agent_field "$agent" cpus); [[ -n "$cpus" ]] || cpus=$DEFAULT_CPUS
+    ram=$(agent_field "$agent" ram_mib); [[ -n "$ram" ]] || ram=$DEFAULT_RAM_MIB
+
+    printf '\n--- sandbox (no project mounted) ---\n'
+    podman run --rm --interactive --tty \
+        --runtime krun \
+        --label almanac.agentbox=1 \
+        --label "almanac.agent=$agent" \
+        --label almanac.purpose=login \
+        --annotation krun.cpus="$cpus" \
+        --annotation krun.ram_mib="$ram" \
+        --tmpfs /workspace \
+        --workdir /workspace \
+        --env "TERM=${TERM:-xterm-256color}" \
+        "$IMAGE" /usr/bin/bash -lc "$obtain"
+    printf -- '--- end sandbox ---\n'
 }
 
 # ---------------------------------------------------------------------------
@@ -253,12 +414,28 @@ cmd_status() {
     fi
 
     printf '\nAgents\n'
-    local name built
+    printf '  %-12s  %-11s  %s\n' AGENT IMAGE CREDENTIAL
+    local name built cred var
     while read -r name; do
         built=$(agent_field "$name" built)
         [[ "$built" == "true" ]] && built="in image" || built="not built"
-        printf '  %-12s  %s\n' "$name" "$built"
+
+        var=$(cred_env_name "$name")
+        if [[ -z "$var" ]]; then
+            cred="no flow recorded"
+        elif [[ -n "${!var:-}" ]]; then
+            cred="$var set in this shell"
+        elif has_cred "$name"; then
+            cred="stored, presented as $var"
+        else
+            cred="none — ujust almanac-agent-login $name"
+        fi
+
+        printf '  %-12s  %-11s  %s\n' "$name" "$built" "$cred"
     done < <(agent_names)
+
+    printf '\n  Credential store: %s\n' "$CRED_DIR"
+    printf '  Never mounted into a sandbox; tokens are passed by name at run time.\n'
 }
 
 # Pulling is what enforces the signature. policy.json requires a sigstore
@@ -333,12 +510,14 @@ cmd_run() {
 
     local token_flags=()
     mapfile -t token_flags < <(forward_tokens "$agent")
-    if (( ${#token_flags[@]} == 0 )); then
-        warn "no credentials found in the environment for '$agent'; it may prompt or fail to authenticate"
-    fi
 
     local env_flags=()
     mapfile -t env_flags < <(forward_passthrough)
+
+    load_cred "$agent"
+    if (( ${#token_flags[@]} == 0 && ${#CRED_FLAGS[@]} == 0 )); then
+        warn "no credential for '$agent'; try \`ujust almanac-agent-login $agent\`"
+    fi
 
     setup_git_identity
     if (( ${#GIT_FLAGS[@]} == 0 )); then
@@ -375,6 +554,7 @@ cmd_run() {
         ${env_flags[@]+"${env_flags[@]}"} \
         ${GIT_FLAGS[@]+"${GIT_FLAGS[@]}"} \
         ${token_flags[@]+"${token_flags[@]}"} \
+        ${CRED_FLAGS[@]+"${CRED_FLAGS[@]}"} \
         "$IMAGE" "$guest_cmd" "$@"
 }
 
@@ -410,6 +590,8 @@ Commands:
   status              Check the runtime, the guest image, and the agents
   update              Pull the latest signed guest image
   ps                  Show running sandboxes
+  login <agent>       Store a credential for an agent
+  logout <agent>      Forget the stored credential (does NOT revoke it)
 
 Options:
   --cpus N            vCPUs for the VM. Defaults to the agent's own figure from
@@ -420,9 +602,14 @@ Options:
                       alone is the design.
 
 Environment:
-  ALMANAC_AGENT_IMAGE  Guest image reference (default $IMAGE)
-  ALMANAC_AGENT_CPUS   Same as --cpus
-  ALMANAC_AGENT_RAM    Same as --ram
+  ALMANAC_AGENT_IMAGE     Guest image reference (default $IMAGE)
+  ALMANAC_AGENT_CPUS      Same as --cpus
+  ALMANAC_AGENT_RAM       Same as --ram
+  ALMANAC_AGENT_CRED_DIR  Credential store (default $CRED_DIR)
+
+Credentials resolve most-specific first: a variable already set in your shell,
+then the store written by `login`. The store is never mounted into the VM — the
+agent is handed the one token it needs, by name, and cannot see the rest.
 
 Carried into the VM: TERM, COLORTERM, LANG, LC_ALL, LC_CTYPE, TZ, NO_COLOR,
 FORCE_COLOR if set, the agent's credential variables, and git user.name /
@@ -444,6 +631,14 @@ main() {
             --ram) RAM_MIB="${2:-}"; shift 2 ;;
             --mount)
                 [[ -n "${2:-}" ]] || die "--mount needs SRC:DST"
+                # The one mount that must never be allowed. Handing an agent the
+                # credential store would undo the entire point of keeping it out
+                # of the guest, and it is an easy thing to do by accident when
+                # mounting a parent directory.
+                case "${2%%:*}" in
+                    "$CRED_DIR"|"$CRED_DIR"/*)
+                        die "refusing to mount the credential store into a sandbox" ;;
+                esac
                 EXTRA_MOUNTS+=(--volume "$2:Z")
                 shift 2
                 ;;
@@ -451,6 +646,8 @@ main() {
             status) cmd_status; return ;;
             update) cmd_update; return ;;
             ps) cmd_ps; return ;;
+            login) shift; cmd_login "$@"; return ;;
+            logout) shift; cmd_logout "$@"; return ;;
             -h|--help|'') usage; return ;;
             --) shift; break ;;
             -*) die "unknown option $1" ;;

@@ -400,39 +400,78 @@ defaults are anywhere near right.
 
 ---
 
-## Phase 4 — Credentials
+## Phase 4 — Credentials  ✅
 
-**Recommendation: drop the "credential broker" service. `--env` is the answer,
-and the spec's stated requirement is already met by it.**
+**The broker is dropped.** §5/§9 wanted one so the token "never lands on a
+shared filesystem", and an env var passed by name satisfies that exactly: the
+value lives in the wrapper's memory and the guest's memory, never on the
+virtiofs share, never in the image, never in argv. A vsock service would add a
+protocol and an attack surface to deliver the same secret to the same untrusted
+party.
 
-The reasoning: §5/§9 want a broker so the token "never lands on a shared
-filesystem." An env var passed by name satisfies that exactly — the value lives
-in the wrapper's memory and the guest's memory, never on the virtiofs share,
-never in the guest image, never in argv. A vsock/AF_UNIX broker would add a host
-service, a protocol, and an attack surface to deliver the same secret to the
-same untrusted party.
+And no transport mitigates the actual threat. The guest needs the token to
+function, so a compromised agent has it by construction whatever channel
+delivered it. What reduces exposure is the credential's *shape* — short-lived,
+narrowly scoped, revocable — which is where this phase's effort went.
 
-More importantly, **no transport mitigates the actual threat.** The guest needs
-the token to function, so a compromised agent has it by construction, whatever
-channel delivered it. What genuinely reduces exposure is the credential's
-*shape*, not its *route*: short-lived tokens, narrow scopes, per-invocation
-revocation, and device-code flows where the agent supports one. That is where
-this phase's effort should go.
+### What the store is actually for
 
-Concretely:
+Not defence against the agent. The problem it solves is narrower and real: the
+agents' interactive logins want a browser, the sandbox has neither a browser nor
+a persistent home, and so every session would start unauthenticated. The obvious
+fix — bind-mounting `~/.claude` or `~/.local/share/opencode` into the guest —
+hands the agent the entire credential store including whatever else is in it.
 
-- `almanac-agent-login <agent>` runs the agent's real login on the **host**,
-  where a browser exists, and stores the result under
-  `~/.local/state/almanac/agent-creds/<agent>.json`, mode 0600, directory 0700.
-- `agentbox` reads it, exports the agent-specific variable, passes `--env NAME`.
-- The credential directory is **never mounted** into the guest.
-- Each of the four agents has its own credential format and login flow, so
-  `agents.json` carries a per-agent record: guest command, env var name,
-  credential path, login command.
+So: log in once on the host, keep the token in a store of our own, and hand
+exactly one token to exactly one agent at run time. The store never crosses the
+boundary.
 
-If you want the broker anyway, say so and I'll design the vsock transport — but
-it should be a deliberate choice made knowing it buys process hygiene, not
-containment.
+### Shape
+
+- `agentbox login <agent>` reads the token with `read -rs`, so it is never
+  echoed, never in scrollback, never in shell history, and never in argv.
+- Stored at `${XDG_STATE_HOME:-~/.local/state}/almanac/agent-creds/<agent>.json`,
+  file `0600`, directory `0700`, written under `umask 077`. Under `$HOME`, so it
+  survives `bootc upgrade` for free — and deliberately not under `/var`, which
+  `bootc container lint` polices.
+- `agents.json` grew a `credential` record: `env` (the variable the token is
+  presented as), `obtain` (a command that *prints* a token, or `null`), `note`.
+- Where `obtain` exists, `login` offers to run it in a **throwaway sandbox with
+  no project mounted** and `/workspace` on tmpfs. That matters because the agent
+  need not be installed on the host at all — the whole point is that it is not.
+  A device-code flow prints a URL, the operator opens it in the host browser.
+- For claude that is `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`, a
+  headless token that can be revoked without touching the account key. Preferring
+  it over `ANTHROPIC_API_KEY` *is* the credential-shape argument in practice.
+- opencode's `auth login` writes a credential file rather than printing a token,
+  and that file would have to be mounted into the guest to be useful — which is
+  the thing being avoided. So `obtain` is `null` and the operator pastes a
+  provider API key, which every provider opencode supports accepts by
+  environment variable.
+
+### Resolution order, and one guard
+
+A variable already set in the caller's shell wins; the store is the fallback.
+Loading the store on top would duplicate the `--env` flag and silently override
+what the operator typed.
+
+`--mount` refuses any source at or under the credential directory. Mounting a
+parent directory by accident is easy, and it would undo the whole arrangement in
+one flag.
+
+`logout` says plainly that it does not revoke anything. If the reason someone is
+running it is a leak, the upstream revocation is the step that matters and this
+was not it.
+
+### Verified how
+
+Driven through a pty with stubbed `podman`/`jq`: `login` stores `0600` in a
+`0700` directory; a run with a stored credential passes `--env
+CLAUDE_CODE_OAUTH_TOKEN` and **the token value appears nowhere in the assembled
+argv**; a shell-set variable produces exactly one flag rather than two;
+`--mount` of the store is refused; `status` reports credential state per agent
+without printing any; `logout` removes the file. `login` correctly refuses to
+run without a tty.
 
 ---
 

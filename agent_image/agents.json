@@ -8,6 +8,11 @@
         "  token_vars environment variables forwarded into the guest BY NAME if",
         "             they are set on the host. Never NAME=value: the value would",
         "             land in the wrapper's argv and from there in ps output.",
+        "  credential how `agentbox login` obtains and stores a token:",
+        "               env     the variable the stored token is presented as",
+        "               obtain  a command that PRINTS a token, or null if the",
+        "                       token has to be fetched from a web console",
+        "               note    what to tell the operator",
         "  cpus       vCPUs for this agent's VM",
         "  ram_mib    memory for this agent's VM, committed up front at boot",
         "  built      whether agent_image/Containerfile actually installs it.",
@@ -24,9 +29,15 @@
             "command": "claude",
             "package": "@anthropic-ai/claude-code",
             "token_vars": [
+                "CLAUDE_CODE_OAUTH_TOKEN",
                 "ANTHROPIC_API_KEY",
                 "ANTHROPIC_AUTH_TOKEN"
             ],
+            "credential": {
+                "env": "CLAUDE_CODE_OAUTH_TOKEN",
+                "obtain": "claude setup-token",
+                "note": "Prints a long-lived OAuth token meant for headless use. ANTHROPIC_API_KEY set in your shell takes precedence over anything stored here."
+            },
             "cpus": 4,
             "ram_mib": 8192,
             "built": true
@@ -40,6 +51,11 @@
                 "OPENAI_API_KEY",
                 "OPENROUTER_API_KEY"
             ],
+            "credential": {
+                "env": "ANTHROPIC_API_KEY",
+                "obtain": null,
+                "note": "opencode's own `auth login` writes a credential file rather than printing a token, and that file would have to be mounted into the guest to be useful. Paste a provider API key instead: every provider opencode supports accepts one by environment variable."
+            },
             "cpus": 4,
             "ram_mib": 8192,
             "built": true
@@ -49,6 +65,11 @@
             "command": "pi",
             "package": null,
             "token_vars": [],
+            "credential": {
+                "env": null,
+                "obtain": null,
+                "note": "Not recorded yet."
+            },
             "cpus": 4,
             "ram_mib": 8192,
             "built": false
@@ -58,6 +79,11 @@
             "command": "hermes",
             "package": null,
             "token_vars": [],
+            "credential": {
+                "env": null,
+                "obtain": null,
+                "note": "Not recorded yet."
+            },
             "cpus": 4,
             "ram_mib": 8192,
             "built": false

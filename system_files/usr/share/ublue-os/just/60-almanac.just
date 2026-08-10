@@ -54,3 +54,13 @@ almanac-agent-status:
 almanac-update-agent-sandbox:
     @/usr/libexec/almanac-agentbox update
 
+# Store a credential for an agent, so sandboxes start authenticated
+[group('Almanac')]
+almanac-agent-login agent:
+    @/usr/libexec/almanac-agentbox login "{{ agent }}"
+
+# Forget an agent's stored credential (this does not revoke it upstream)
+[group('Almanac')]
+almanac-agent-logout agent:
+    @/usr/libexec/almanac-agentbox logout "{{ agent }}"
+
