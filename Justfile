@@ -33,17 +33,23 @@ check:
     echo "Checking syntax: Justfile"
     just --unstable --fmt --check -f Justfile
     just check-krun-not-default
-    just check-copy-sources
+    just check-build-context
 
-# Verify every COPY source exists in that image's build context
+# Verify build-context paths: COPY sources, and /ctx references in build.sh
 #
-# COPY paths resolve against the build CONTEXT, not against the directory the
-# Containerfile lives in. A Containerfile in a subdirectory that copies the
-# files next to it is correct only if that subdirectory is also the context —
-# and getting it wrong fails several minutes into a CI build, after the
-# expensive layers, with an error that names a path nobody wrote.
+# Two ways to get a path wrong here, both of which fail minutes into a CI build,
+# after the expensive layers, with an error naming a path nobody wrote:
+#
+#   1. COPY resolves against the build CONTEXT, not against the directory the
+#      Containerfile lives in. A Containerfile in a subdirectory that copies the
+#      files beside it is correct only if that subdirectory is also the context.
+#
+#   2. build.sh does not see the repository. The context stage is bind-mounted
+#      at /ctx, so a file the Containerfile placed at /agent_image is reachable
+#      as /ctx/agent_image — and the bare path is a plausible-looking absolute
+#      path that simply is not there.
 [group('Just')]
-check-copy-sources:
+check-build-context:
     #!/usr/bin/bash
     set -uo pipefail
 
@@ -63,11 +69,26 @@ check-copy-sources:
     check_context Containerfile .
     check_context agent_image/Containerfile agent_image
 
+    # Everything the ctx stage carries is reachable only under /ctx. Counting
+    # rather than pattern-matching the absence of a prefix: every mention of
+    # the path must be a prefixed mention, and if the two counts differ then
+    # one of them is bare.
+    for dir in $(grep -oE '^COPY [a-z_]+ /[a-z_]*' Containerfile | awk '{print $3}' | grep -v '^/$'); do
+        total=$(grep -ohF "${dir}/" build_files/*.sh | wc -l)
+        prefixed=$(grep -ohF "/ctx${dir}/" build_files/*.sh | wc -l)
+        if [[ "$total" -ne "$prefixed" ]]; then
+            grep -nF "${dir}/" build_files/*.sh | grep -vF "/ctx${dir}/" >&2
+            echo "ERROR: the above reference ${dir}/ without the /ctx prefix." >&2
+            echo "       The context stage is mounted at /ctx; use /ctx${dir}/..." >&2
+            failed=1
+        fi
+    done
+
     if [[ "$failed" -ne 0 ]]; then
-        echo "A COPY source is missing; see the build recipe's note about contexts." >&2
+        echo "See the build recipe's note about build contexts." >&2
         exit 1
     fi
-    echo "OK: every COPY source resolves against its build context"
+    echo "OK: COPY sources and /ctx references both resolve"
 
 # Refuse to ship krun as podman's default runtime
 #

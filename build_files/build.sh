@@ -44,7 +44,7 @@ dnf5 install -y crun-krun libkrun jq
 # One registry, two consumers. agent_image/agents.json is copied into the guest
 # rootfs by agent_image/Containerfile and onto the host here, so `agentbox
 # --list` and what the VM can actually run are the same list by construction.
-install -D -m 0644 /agent_image/agents.json /usr/share/almanac/agents.json
+install -D -m 0644 /ctx/agent_image/agents.json /usr/share/almanac/agents.json
 
 # Merge the agent image's signature requirement into the base image's container
 # policy rather than replacing the file. `default: reject` or a wholesale
