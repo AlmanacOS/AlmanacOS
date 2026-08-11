@@ -16,9 +16,10 @@ set -exo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# The image the installer lays down. Same build as this one — see the
-# Containerfile's FROM.
-readonly PAYLOAD_IMAGE="ghcr.io/clemperorpenguin/almanacos:latest"
+# The image the installer lays down. The same reference the Containerfile built
+# FROM, passed in rather than written again: the payload and the live rootfs
+# being different builds is a bug that would only show up after an install.
+readonly PAYLOAD_IMAGE="${BASE_IMAGE:?BASE_IMAGE must be passed in from the Containerfile}"
 
 # /root is a symlink into /var on an ostree system, and the target does not
 # exist in a container build. dracut and podman both want to write there.
@@ -82,7 +83,18 @@ install -Dm 0644 "$SCRIPT_DIR/almanacos.conf" /etc/anaconda/profile.d/almanacos.
 
 # Appended, not overwritten: anaconda-live ships this file with content of its
 # own and replacing it wholesale discards whatever the product needs.
-cat "$SCRIPT_DIR/interactive-defaults.ks" >>/usr/share/anaconda/interactive-defaults.ks
+#
+# @PAYLOAD_IMAGE@ is substituted rather than written into the file so the
+# reference has exactly one source, the Containerfile's BASE_IMAGE.
+sed "s|@PAYLOAD_IMAGE@|${PAYLOAD_IMAGE}|g" "$SCRIPT_DIR/interactive-defaults.ks" \
+    >>/usr/share/anaconda/interactive-defaults.ks
+
+# `grep -q ... && exit` would abort the script under errexit on the *success*
+# path, since a failed grep makes the whole && list return non-zero.
+if grep -q '@PAYLOAD_IMAGE@' /usr/share/anaconda/interactive-defaults.ks; then
+    echo "payload reference was not substituted" >&2
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # The ISO itself

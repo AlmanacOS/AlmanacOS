@@ -43,7 +43,7 @@ CRED_DIR="${ALMANAC_AGENT_CRED_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/almana
 # The signed guest rootfs. Verified at pull time by the sigstoreSigned policy in
 # /etc/containers/policy.json, not by a cosign binary at runtime — cosign is not
 # in the image.
-IMAGE="${ALMANAC_AGENT_IMAGE:-ghcr.io/clemperorpenguin/almanacos-agent:latest}"
+IMAGE="${ALMANAC_AGENT_IMAGE:-ghcr.io/almanacos/almanacos-agent:latest}"
 
 # libkrun's own defaults are 1 GiB of RAM and a cpu count derived from affinity.
 # 1 GiB OOM-kills a coding agent partway through a large edit, which presents as

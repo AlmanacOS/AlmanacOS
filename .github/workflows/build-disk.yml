@@ -84,6 +84,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      # Bootc Image Builder stopped pulling the target image itself; it now
+      # fails with "image not known" if the image is not already in local
+      # storage. The action runs it under sudo, so the image has to land in
+      # *root's* storage — which is also why this logs in with `sudo podman
+      # login` rather than docker/login-action, whose credentials go to the
+      # runner user's config and would not be seen.
+      - name: Pull the image to build from
+        run: |
+          set -euo pipefail
+          sudo podman login ghcr.io \
+            -u "${{ github.actor }}" \
+            -p "${{ secrets.GITHUB_TOKEN }}"
+          sudo podman pull "${IMAGE_REGISTRY}/${IMAGE_NAME}:${DEFAULT_TAG}"
+
       - name: Build disk images
         id: build
         uses: osbuild/bootc-image-builder-action@30960621b85c9e76c653082f9ef4cab5a10210d5 # main
@@ -158,23 +172,42 @@ jobs:
       # Built as root so it lands in root's container storage: titanoboa reads
       # the rootfs through `sudo podman run --mount type=image`, which resolves
       # against root's storage and not the runner user's.
+      #
+      # BASE_IMAGE is passed rather than left to the Justfile default, which
+      # derives it from REPO_ORGANIZATION. Here it comes from
+      # github.repository_owner, so the ISO is always built from the image this
+      # repository actually publishes even if the two disagree.
       - name: Build live ISO image
         run: |
+          set -euo pipefail
+          sudo podman login ghcr.io \
+            -u "${{ github.actor }}" \
+            -p "${{ secrets.GITHUB_TOKEN }}"
           sudo -E $(command -v just) build-iso-image \
             localhost/${IMAGE_NAME}-live \
-            ${DEFAULT_TAG}
+            ${DEFAULT_TAG} \
+            ${IMAGE_REGISTRY}/${IMAGE_NAME}:${DEFAULT_TAG}
 
+      # iso-dest is deliberately left at its default of
+      # ${{ github.workspace }}/output.iso. The action resolves the path with
+      # plain `realpath`, which requires the parent directory to already exist —
+      # pointing it into output/ fails with "No such file or directory" after
+      # the ISO has been built, because the action creates that directory only
+      # afterwards. The workspace root always exists, so the ISO is moved into
+      # place below instead.
       - name: Build ISO
         id: build
         uses: ublue-os/titanoboa@main
         with:
           image-ref: localhost/${{ env.IMAGE_NAME }}-live:${{ env.DEFAULT_TAG }}
-          iso-dest: ${{ github.workspace }}/output/${{ env.IMAGE_NAME }}.iso
 
-      - name: Checksum ISO
+      - name: Name and checksum the ISO
         run: |
+          set -euo pipefail
+          mkdir -p output
+          mv "${{ steps.build.outputs.iso-dest }}" "output/${IMAGE_NAME}.iso"
           cd output
-          sha256sum ${IMAGE_NAME}.iso | tee ${IMAGE_NAME}.iso-CHECKSUM
+          sha256sum "${IMAGE_NAME}.iso" | tee "${IMAGE_NAME}.iso-CHECKSUM"
 
       - name: Upload ISO and Checksum to Job Artifacts
         if: inputs.upload-to-s3 != true && github.event_name != 'pull_request'

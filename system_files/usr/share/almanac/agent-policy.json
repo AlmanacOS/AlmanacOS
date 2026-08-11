@@ -12,7 +12,7 @@
     ],
     "transports": {
         "docker": {
-            "ghcr.io/clemperorpenguin/almanacos-agent": [
+            "ghcr.io/almanacos/almanacos-agent": [
                 {
                     "type": "sigstoreSigned",
                     "keyPath": "/etc/pki/containers/almanacos.pub",

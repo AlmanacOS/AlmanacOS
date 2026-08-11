@@ -6,5 +6,5 @@
 # without this file the sigstoreSigned rule in policy.json would fail every pull
 # with "missing signature" even when the signature is sitting right there.
 docker:
-    ghcr.io/clemperorpenguin:
+    ghcr.io/almanacos:
         use-sigstore-attachments: true

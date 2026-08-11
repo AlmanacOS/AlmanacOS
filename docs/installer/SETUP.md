@@ -84,6 +84,13 @@ already that image plus a desktop session. That trade is deliberate, and it is
 worth measuring the result before deciding where these get published — GitHub
 artifact limits are a real constraint at this size.
 
+**The published image has to be public.** That `podman pull` runs *inside* a
+container build, where the host's registry credentials are not available and
+cannot easily be made available. `sudo podman login` on the runner covers the
+`FROM`, but not the pull nested inside it. GHCR packages are private when first
+published, so a package that has never been made public will fail this step —
+and it fails deep into the build, after the base image has already been pulled.
+
 **The origin rewrite is not optional.** Installing from container storage makes
 ostree record *that* as the deployment's origin, so a freshly installed machine
 believes its upstream is a container store that only existed on the ISO, and
@@ -145,10 +152,11 @@ Following the README's *Setting Up ISO Builds*:
 1. **"Modify `disk_config/iso.toml` to point to your custom container image."**
    No longer applicable — that file is for BIB's `anaconda-iso` type, which no
    longer exists. `disk_config/iso-gnome.toml` and `iso-kde.toml` have been
-   deleted for the same reason. The equivalent is the `FROM` in
-   `iso_image/Containerfile` and the payload reference in `build.sh` and
-   `interactive-defaults.ks`, all three of which name
-   `ghcr.io/clemperorpenguin/almanacos:latest`.
+   deleted for the same reason. The equivalent is the `BASE_IMAGE` build
+   argument in `iso_image/Containerfile`, which is the single source for both
+   the `FROM` and the payload — `build.sh` and `interactive-defaults.ks` get it
+   passed in rather than naming it again. `just` derives it from
+   `REPO_ORGANIZATION`; CI passes its own `IMAGE_REGISTRY`.
 2. **"Edit `IMAGE_REGISTRY`, `IMAGE_NAME` and `DEFAULT_TAG`."** Done — they are
    derived from the repository and lowercased, matching `build.yml`.
 3. **S3 secrets.** Not done, and yours to add if you want uploads:

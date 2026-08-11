@@ -241,7 +241,7 @@ can be built until this exists. What shipped:
   - No shared `/tmp/digestfile`, by construction rather than by care.
 
   It reuses `generate-build-tags`/`tag-images` unchanged and the same
-  `SIGNING_SECRET`, and pushes to `ghcr.io/clemperorpenguin/almanacos-agent`.
+  `SIGNING_SECRET`, and pushes to `ghcr.io/almanacos/almanacos-agent`.
   No rechunk and no `bootc container lint` — both are bootc concerns and this is
   a plain OCI rootfs.
 - **Digest guard** — the push loop in *both* workflows now asserts that every
@@ -284,7 +284,7 @@ happens at pull time via three pieces:
 - `system_files/etc/pki/containers/almanacos.pub` — a copy of the repo's
   `cosign.pub`.
 - `system_files/etc/containers/registries.d/ghcr.io.yaml` — sets
-  `use-sigstore-attachments: true` for `ghcr.io/clemperorpenguin`. Without this
+  `use-sigstore-attachments: true` for `ghcr.io/almanacos`. Without this
   the stack never looks for the `sha256-<digest>.sig` artifact cosign pushes,
   and every pull fails with "missing signature" while the signature sits in the
   registry untouched.
@@ -667,7 +667,7 @@ host outside the allowlist and confirm it fails.
 
 Pre-merge, on the build side: `just check` (just fmt + the new krun-default
 guard), `just build` and `just build-agent-image` locally, and confirm the new
-CI job pushes and signs to `ghcr.io/clemperorpenguin/almanacos-agent`.
+CI job pushes and signs to `ghcr.io/almanacos/almanacos-agent`.
 
 ## Known-unresolved
 

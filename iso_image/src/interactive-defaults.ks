@@ -16,7 +16,7 @@
 # second check available at install time that would mean anything, and asking
 # for one that cannot be satisfied would only fail the install.
 
-ostreecontainer --url=ghcr.io/clemperorpenguin/almanacos:latest --transport=containers-storage --no-signature-verification
+ostreecontainer --url=@PAYLOAD_IMAGE@ --transport=containers-storage --no-signature-verification
 
 # Point the installed system at the registry for updates.
 #
@@ -40,6 +40,6 @@ ostreecontainer --url=ghcr.io/clemperorpenguin/almanacos:latest --transport=cont
 %post --erroronfail --log=/tmp/almanac-origin-rewrite.log
 set -x
 sed -i \
-    's|^container-image-reference=.*|container-image-reference=ostree-unverified-registry:ghcr.io/clemperorpenguin/almanacos:latest|' \
+    's|^container-image-reference=.*|container-image-reference=ostree-unverified-registry:@PAYLOAD_IMAGE@|' \
     /ostree/deploy/default/deploy/*.origin
 %end

@@ -22,6 +22,12 @@ export iso_image_desc := "AlmanacOS live ISO image"
 # The container that assembles the ISO from the image above.
 export titanoboa_image := "ghcr.io/ublue-os/titanoboa:latest"
 
+# The published image the live ISO is built from and installs. Derived, not
+# written out: CI computes the same thing from github.repository_owner and
+# passes it as a --build-arg, so if the two ever disagree it is because the
+# repository moved and REPO_ORGANIZATION was not updated to match.
+export base_image := "ghcr.io/" + lowercase(env_var("REPO_ORGANIZATION")) + "/" + lowercase(env_var("IMAGE_NAME")) + ":" + env_var("DEFAULT_TAG")
+
 alias build-vm := build-qcow2
 alias rebuild-vm := rebuild-qcow2
 alias run-vm := run-vm-qcow2
@@ -250,7 +256,7 @@ build-agent-image $target_image=agent_image_name $tag=default_tag: (build target
 # `just build-iso` runs this and then assembles the ISO.
 
 # Example: just build-iso-image almanacos-live latest
-build-iso-image $target_image=iso_image_name $tag=default_tag: (build target_image tag "iso_image/Containerfile" iso_image_desc "iso_image" "--cap-add sys_admin --security-opt label=disable --squash")
+build-iso-image $target_image=iso_image_name $tag=default_tag $base=base_image: (build target_image tag "iso_image/Containerfile" iso_image_desc "iso_image" ("--cap-add sys_admin --security-opt label=disable --squash --build-arg BASE_IMAGE=" + base))
 
 # Split the image for smaller updates (New)!
 rechunk $target_image=image_name $tag=default_tag:

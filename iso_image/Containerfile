@@ -16,12 +16,21 @@
 
 # The image the ISO is made of and the image it installs are the same build.
 # Anything else means shipping an installer that lays down a system nobody
-# tested the live environment against.
-FROM ghcr.io/clemperorpenguin/almanacos:latest
+# tested the live environment against — which is also why this is one ARG and
+# not a reference repeated in three files.
+#
+# The default is only for a bare `podman build`; `just build-iso-image` derives
+# it from REPO_ORGANIZATION and CI passes its own IMAGE_REGISTRY, so the ISO
+# always follows whatever namespace actually published the image.
+ARG BASE_IMAGE=ghcr.io/almanacos/almanacos:latest
+FROM ${BASE_IMAGE}
+
+# Redeclared: FROM starts a new build stage and ARGs do not cross it.
+ARG BASE_IMAGE
 
 COPY ./src /src
 
 RUN --mount=type=cache,target=/var/tmp/libdnf5,id=libdnf5 \
-    /src/build.sh
+    BASE_IMAGE="${BASE_IMAGE}" /src/build.sh
 
 RUN rm -rf /src
