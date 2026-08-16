@@ -113,9 +113,6 @@ jobs:
             "${IMAGE_NAME}" \
             "${DEFAULT_TAG}" \
             "${ALIAS_TAGS}"
-            
-          # Explicitly tag the new image as 'latest' to guarantee the correct image ID
-          sudo podman tag ${IMAGE_NAME}:${DEFAULT_TAG} ${IMAGE_NAME}:latest
 
       # These `if` statements are so that pull requests for your custom images do not make it publish any packages under your name without you knowing
       # They also check if the runner is on the default branch so that things like the merge queue (if you enable it), are going to work
@@ -139,9 +136,7 @@ jobs:
           # same digest. Assert it rather than assume it: the digest captured
           # here is the one that gets signed below.
           digest=""
-          
-          # Iterate through alias tags and include 'latest'
-          for tag in ${ALIAS_TAGS} latest; do
+          for tag in ${ALIAS_TAGS}; do
             sudo -E podman push --digestfile=/tmp/digestfile ${IMAGE_NAME}:${tag} ${IMAGE_REGISTRY}/${IMAGE_NAME}:${tag}
             pushed=$(< /tmp/digestfile)
             if [[ -n "${digest}" && "${digest}" != "${pushed}" ]]; then
@@ -150,6 +145,12 @@ jobs:
             fi
             digest="${pushed}"
           done
+
+          # Remotely mirror the exact pushed image to 'latest'.
+          # This completely bypasses local Podman manifest mutation.
+          sudo -E skopeo copy \
+            docker://${IMAGE_REGISTRY}/${IMAGE_NAME}:${tag} \
+            docker://${IMAGE_REGISTRY}/${IMAGE_NAME}:latest
 
           echo "digest=${digest}" >> $GITHUB_OUTPUT
 
