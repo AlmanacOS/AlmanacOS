@@ -132,25 +132,40 @@ jobs:
         run: |
           set -euox pipefail
 
-          # Every tag points at the same image ID, so every push must report the
-          # same digest. Assert it rather than assume it: the digest captured
-          # here is the one that gets signed below.
-          digest=""
-          for tag in ${ALIAS_TAGS}; do
-            sudo -E podman push --digestfile=/tmp/digestfile ${IMAGE_NAME}:${tag} ${IMAGE_REGISTRY}/${IMAGE_NAME}:${tag}
-            pushed=$(< /tmp/digestfile)
-            if [[ -n "${digest}" && "${digest}" != "${pushed}" ]]; then
-              echo "::error::digest changed between tag pushes (${digest} != ${pushed}); refusing to sign"
-              exit 1
-            fi
-            digest="${pushed}"
+          dest="${IMAGE_REGISTRY}/${IMAGE_NAME}"
+          read -ra tags <<< "${ALIAS_TAGS}"
+
+          # Push ONCE. Every tag names the same local image ID, but that does
+          # not make repeated pushes produce the same manifest: podman chooses
+          # each layer's compression per push, partly from what it finds already
+          # present in the destination, so push N+1 can legitimately emit a
+          # different manifest -- and therefore a different digest -- for an
+          # identical image. (That is the case `podman push --force-compression`
+          # exists for.) Pushing once removes the choice instead of asserting
+          # about it afterwards.
+          sudo -E podman push --digestfile=/tmp/digestfile \
+            "${IMAGE_NAME}:${tags[0]}" \
+            "docker://${dest}:${tags[0]}"
+          digest=$(< /tmp/digestfile)
+
+          # Every remaining tag is written server-side against that digest. The
+          # manifest is copied byte-for-byte -- no local blob is re-read and
+          # nothing is recompressed -- so the digest cannot drift.
+          for tag in "${tags[@]:1}"; do
+            sudo -E skopeo copy --all \
+              "docker://${dest}@${digest}" \
+              "docker://${dest}:${tag}"
           done
 
-          # Remotely mirror the exact pushed image to 'latest'.
-          # This completely bypasses local Podman manifest mutation.
-          sudo -E skopeo copy \
-            docker://${IMAGE_REGISTRY}/${IMAGE_NAME}:${tag} \
-            docker://${IMAGE_REGISTRY}/${IMAGE_NAME}:latest
+          # Assert rather than assume: the digest signed below is the one every
+          # published tag actually resolves to.
+          for tag in "${tags[@]}"; do
+            resolved=$(sudo -E skopeo inspect --format '{{.Digest}}' "docker://${dest}:${tag}")
+            if [[ "${resolved}" != "${digest}" ]]; then
+              echo "::error::${dest}:${tag} resolves to ${resolved}, expected ${digest}; refusing to sign"
+              exit 1
+            fi
+          done
 
           echo "digest=${digest}" >> $GITHUB_OUTPUT
 
