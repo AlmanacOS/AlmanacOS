@@ -119,18 +119,28 @@ jobs:
         run: |
           set -euox pipefail
 
-          # Every tag points at the same image ID, so every push must report the
-          # same digest. Assert it rather than assume it: the digest captured
-          # here is the one that gets signed below.
-          digest=""
-          for tag in ${ALIAS_TAGS}; do
-            sudo -E podman push --digestfile=/tmp/digestfile ${IMAGE_NAME}:${tag} ${IMAGE_REGISTRY}/${IMAGE_NAME}:${tag}
-            pushed=$(< /tmp/digestfile)
-            if [[ -n "${digest}" && "${digest}" != "${pushed}" ]]; then
-              echo "::error::digest changed between tag pushes (${digest} != ${pushed}); refusing to sign"
+          dest="${IMAGE_REGISTRY}/${IMAGE_NAME}"
+          read -ra tags <<< "${ALIAS_TAGS}"
+
+          # Push ONCE; see build.yml for why repeated pushes of one image ID can
+          # emit different manifests.
+          sudo -E podman push --digestfile=/tmp/digestfile \
+            "${IMAGE_NAME}:${tags[0]}" \
+            "docker://${dest}:${tags[0]}"
+          digest=$(< /tmp/digestfile)
+
+          for tag in "${tags[@]:1}"; do
+            sudo -E skopeo copy --all \
+              "docker://${dest}@${digest}" \
+              "docker://${dest}:${tag}"
+          done
+
+          for tag in "${tags[@]}"; do
+            resolved=$(sudo -E skopeo inspect --format '{{.Digest}}' "docker://${dest}:${tag}")
+            if [[ "${resolved}" != "${digest}" ]]; then
+              echo "::error::${dest}:${tag} resolves to ${resolved}, expected ${digest}; refusing to sign"
               exit 1
             fi
-            digest="${pushed}"
           done
 
           echo "digest=${digest}" >> $GITHUB_OUTPUT
