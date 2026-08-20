@@ -93,6 +93,9 @@ systemctl enable podman.socket
 
 systemctl enable lemond
 
+systemctl enable flatpak-preinstall.service
+systemctl enable flatpak-nuke-fedora.service
+
 ### Homebrew (from ghcr.io/ublue-os/brew — same mechanism Bluefin/Bazzite use)
 # brew-setup.service extracts /usr/share/homebrew.tar.zst to /home/linuxbrew on
 # first boot, guarded by /etc/.linuxbrew. The preset file ships in system_files.

@@ -1,0 +1,27 @@
+[Flatpak Preinstall io.github.kolunmi.Bazaar]
+Branch=stable
+IsRuntime=false
+
+[Flatpak Preinstall org.kde.haruna]
+Branch=stable
+IsRuntime=false
+
+[Flatpak Preinstall org.io.github.DenysMb.Kontainer]
+Branch=stable
+IsRuntime=false
+
+[Flatpak Preinstall com.github.tchx84.Flatseal]
+Branch=stable
+IsRuntime=false
+
+[Flatpak Preinstall io.missioncenter.MissionCenter]
+Branch=stable
+IsRuntime=false
+
+[Flatpak Preinstall org.upscayl.Upscayl]
+Branch=stable
+IsRuntime=false
+
+[Flatpak Preinstall com.jeffser.Alpaca]
+Branch=stable
+IsRuntime=false
