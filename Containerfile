@@ -1,9 +1,11 @@
+# Add homebrew
+ARG BREW_IMAGE="ghcr.io/ublue-os/brew:latest"
+FROM ${BREW_IMAGE} AS brew
 # Allow build scripts to be referenced without being copied into the final image
 FROM scratch AS ctx
+COPY --from=brew /system_files /system_files
 COPY build_files /
 COPY system_files /system_files
-# The agent sandbox's guest image is built separately, but build.sh takes the
-# agent registry from here so the host and the guest cannot drift apart.
 COPY agent_image /agent_image
 
 # >>> microsandbox pin — managed by `just bump-microsandbox`, do not hand-edit.
