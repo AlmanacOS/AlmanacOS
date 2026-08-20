@@ -24,10 +24,10 @@ dnf5 -y install lemonade
 # disable lemonade copr so it is not enabled on the image
 dnf5 -y copr disable abn/lemonade
 
-# AMD-specific: install native fastflowlm and hrx
-dnf5 -y copr enable abn/amd-npu
-dnf5 -y install fastflowlm hrx
-dnf5 -y copy disable abn/amd-npu
+# AMD-specific: install native fastflowlm and hrx - disabled for now
+# dnf5 -y copr enable abn/amd-npu
+# dnf5 -y install fastflowlm hrx
+# dnf5 -y copy disable abn/amd-npu
 
 # AlmanacOS RPMs via copr
 dnf5 -y copr enable clemperorpenguin/AlmanacOS
