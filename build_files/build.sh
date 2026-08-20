@@ -49,6 +49,9 @@ dnf5 install -y crun-krun libkrun jq
 # --list` and what the VM can actually run are the same list by construction.
 install -D -m 0644 /ctx/agent_image/agents.json /usr/share/almanac/agents.json
 
+# microsandbox prebuilt runtime (see script header for why it is not an RPM).
+/ctx/microsandbox.sh
+
 # Merge the agent image's signature requirement into the base image's container
 # policy rather than replacing the file. `default: reject` or a wholesale
 # overwrite would break every unsigned pull on the system — Flatpak runtimes,
