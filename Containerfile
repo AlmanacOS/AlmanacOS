@@ -6,6 +6,11 @@ COPY system_files /system_files
 # agent registry from here so the host and the guest cannot drift apart.
 COPY agent_image /agent_image
 
+# >>> microsandbox pin — managed by `just bump-microsandbox`, do not hand-edit.
+# The digest is written only after `gh release verify-asset` validates the
+# GitHub release attestation (release↔tag↔asset binding, NOT build provenance).
+ADD --checksum=sha256:REPLACE_ME_RUN_JUST_BUMP https://github.com/superradcompany/microsandbox/releases/download/v0.6.12/microsandbox-linux-x86_64.tar.gz /microsandbox.tar.gz
+
 # Base Image
 FROM ghcr.io/ublue-os/kinoite-main:latest
 ## Other possible base images include:
