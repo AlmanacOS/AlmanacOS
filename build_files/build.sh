@@ -93,6 +93,13 @@ systemctl enable podman.socket
 
 systemctl enable lemond
 
+### Homebrew (from ghcr.io/ublue-os/brew — same mechanism Bluefin/Bazzite use)
+# brew-setup.service extracts /usr/share/homebrew.tar.zst to /home/linuxbrew on
+# first boot, guarded by /etc/.linuxbrew. The preset file ships in system_files.
+systemctl preset brew-setup.service
+systemctl preset brew-update.timer
+systemctl preset brew-upgrade.timer
+
 # Make sure just scripts are executable
 chmod +x /usr/libexec/almanac-memory
 chmod +x /usr/libexec/almanac-models
