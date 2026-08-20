@@ -619,3 +619,38 @@ format:
     fi
     # Run shfmt on all Bash scripts
     /usr/bin/find . -iname "*.sh" -type f -exec shfmt --write "{}" ';'
+
+# Verify the currently pinned microsandbox release attestation.
+[group('Agent sandbox')]
+verify-microsandbox:
+    #!/usr/bin/bash
+    set -euo pipefail
+    repo="superradcompany/microsandbox"
+    asset="microsandbox-linux-x86_64.tar.gz"
+    version=$(grep -oP 'releases/download/v\K[0-9.]+' Containerfile)
+    pinned=$(grep -oP 'ADD --checksum=sha256:\K[0-9a-f]{64}' Containerfile)
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    gh release download "v${version}" --repo "$repo" --pattern "$asset" --dir "$tmp"
+    gh release verify "v${version}" --repo "$repo"
+    gh release verify-asset "v${version}" "${tmp}/${asset}" --repo "$repo"
+    actual=$(sha256sum "${tmp}/${asset}" | cut -d' ' -f1)
+    if [ "$actual" != "$pinned" ]; then
+        echo "PIN MISMATCH: Containerfile has $pinned, release has $actual" >&2
+        exit 1
+    fi
+    echo "microsandbox v${version} verified and pin matches"
+
+# Bump the pinned microsandbox version, verifying before writing.
+[group('Agent sandbox')]
+bump-microsandbox version:
+    #!/usr/bin/bash
+    set -euo pipefail
+    repo="superradcompany/microsandbox"
+    asset="microsandbox-linux-x86_64.tar.gz"
+    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    gh release download "v{{ version }}" --repo "$repo" --pattern "$asset" --dir "$tmp"
+    gh release verify "v{{ version }}" --repo "$repo"
+    gh release verify-asset "v{{ version }}" "${tmp}/${asset}" --repo "$repo"
+    digest=$(sha256sum "${tmp}/${asset}" | cut -d' ' -f1)
+    sed -i -E "s|^ADD --checksum=sha256:[0-9a-f]+ .*microsandbox-linux-x86_64\.tar\.gz /microsandbox\.tar\.gz$|ADD --checksum=sha256:${digest} https://github.com/${repo}/releases/download/v{{ version }}/${asset} /microsandbox.tar.gz|" Containerfile
+    echo "pinned microsandbox v{{ version }} -> sha256:${digest}"
