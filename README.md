@@ -1,5 +1,7 @@
 # AlmanacOS
 
+**PRE-ALPHA not for production**
+
 AlmanacOS is a bootc desktop image for running language models on hardware you
 own - including hardware that never touches a network. Fedora Kinoite
 underneath, so it is a KDE desktop that updates atomically and rolls back when
