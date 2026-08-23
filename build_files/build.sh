@@ -19,10 +19,10 @@ dnf5 install -y tmux
 dnf5 -y install ramalama
 
 # add lemonade via copr:
-dnf5 -y copr enable abn/lemonade
+dnf5 -y copr enable clemperorpenguin/lemonade
 dnf5 -y install lemonade
 # disable lemonade copr so it is not enabled on the image
-dnf5 -y copr disable abn/lemonade
+dnf5 -y copr disable clemperorpenguin/lemonade
 
 # AMD-specific: install native fastflowlm and hrx - disabled for now
 # dnf5 -y copr enable abn/amd-npu
