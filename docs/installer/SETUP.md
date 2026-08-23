@@ -100,9 +100,9 @@ That reference is left **unverified**, which is the same posture the system has
 today and is not the right long-term answer — these images are cosign-signed by
 CI and the public key already ships at `/etc/pki/containers/almanacos.pub`.
 Turning it on is two changes: `ostree-image-signed:docker://` in the kickstart,
-and a `sigstoreSigned` entry for this repository in
-`system_files/usr/share/almanac/agent-policy.json`, which currently scopes only
-the agent image. It is deliberately left out here: a policy that rejects the
+and a `sigstoreSigned` entry for this repository merged into
+`/etc/containers/policy.json` by `build_files/build.sh`. It is deliberately
+left out here: a policy that rejects the
 base image breaks `bootc upgrade` on every machine that has already deployed the
 image *carrying that policy*, and recovering means a rollback. Worth doing on
 purpose against a test machine, not as a side effect of wiring up ISO builds.

@@ -15,8 +15,8 @@
 #   2. <exe dir>/../lib/libkrunfw.so.<ver>
 #   3. $MSB_HOME/lib/libkrunfw.so.<ver>
 # So the fork is installed BESIDE the binary in /usr/libexec/microsandbox.
-# That keeps it out of /usr/lib64 and out of the ld.so cache entirely, so it
-# can never shadow the libkrunfw that Fedora's libkrun uses for agentbox.
+# That keeps it out of /usr/lib64 and out of the ld.so cache entirely, so the
+# fork can never shadow a packaged libkrunfw if one is ever layered in.
 # LD_LIBRARY_PATH and ld.so.conf.d drop-ins are both wrong here — the first
 # has no effect, the second creates the collision we're avoiding.
 #

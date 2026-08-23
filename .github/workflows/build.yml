@@ -10,8 +10,6 @@ on:
       - main
     paths-ignore:
       - '**/README.md'
-      # The guest rootfs is built by build-agent.yml; it is not part of the OS image.
-      - 'agent_image/**'
   workflow_dispatch:
 
 env:

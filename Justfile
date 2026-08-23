@@ -9,11 +9,6 @@ export image_logo_url := env_var("IMAGE_LOGO_URL")
 export default_tag := env_var("DEFAULT_TAG")
 export bib_image := env_var("BIB_IMAGE")
 
-# The agent sandbox guest image, built from agent_image/Containerfile.
-# Lowercased because OCI repository names must be lowercase and IMAGE_NAME is not.
-export agent_image_name := lowercase(env_var("IMAGE_NAME")) + "-agent"
-export agent_image_desc := "AlmanacOS agent sandbox guest image"
-
 # The live ISO image, built from iso_image/Containerfile. This is AlmanacOS
 # plus a live session and Anaconda; titanoboa turns it into the ISO.
 export iso_image_name := lowercase(env_var("IMAGE_NAME")) + "-live"
@@ -46,7 +41,6 @@ check:
     done
     echo "Checking syntax: Justfile"
     just --unstable --fmt --check -f Justfile
-    just check-krun-not-default
     just check-build-context
 
 # Verify build-context paths: COPY sources, and /ctx references in build.sh
@@ -59,8 +53,8 @@ check:
 #      files beside it is correct only if that subdirectory is also the context.
 #
 #   2. build.sh does not see the repository. The context stage is bind-mounted
-#      at /ctx, so a file the Containerfile placed at /agent_image is reachable
-#      as /ctx/agent_image — and the bare path is a plausible-looking absolute
+#      at /ctx, so a file the Containerfile placed at /system_files is reachable
+#      as /ctx/system_files — and the bare path is a plausible-looking absolute
 #      path that simply is not there.
 [group('Just')]
 check-build-context:
@@ -82,7 +76,6 @@ check-build-context:
     }
 
     check_context Containerfile .
-    check_context agent_image/Containerfile agent_image
     check_context iso_image/Containerfile iso_image
 
     # Everything the ctx stage carries is reachable only under /ctx. Counting
@@ -105,25 +98,6 @@ check-build-context:
         exit 1
     fi
     echo "OK: COPY sources and /ctx references both resolve"
-
-# Refuse to ship krun as podman's default runtime
-#
-# Setting `runtime = "krun"` in containers.conf is the tempting one-line version
-# of the agent sandbox, and it breaks the image: distrobox and toolbox both
-# `enter` via `podman exec`, and krun does not implement exec (crun#2090). The
-# runtime belongs on the individual `podman run` in almanac-agentbox and nowhere
-# else, so guard the shortcut rather than trusting everyone to remember.
-[group('Just')]
-check-krun-not-default:
-    #!/usr/bin/bash
-    set -euo pipefail
-    if grep -rniE '^[^#]*runtime[[:space:]]*=[[:space:]]*"?krun' \
-        system_files/ build_files/ 2>/dev/null; then
-        echo "ERROR: krun is being set as a default runtime (see above)." >&2
-        echo "This breaks 'distrobox enter' and 'toolbox enter' image-wide." >&2
-        exit 1
-    fi
-    echo "OK: krun is not configured as a default runtime"
 
 # Fix Just Syntax
 [group('Just')]
@@ -237,14 +211,6 @@ build $target_image=image_name $tag=default_tag $containerfile="Containerfile" $
     PODMAN_BUILD_ARGS+=(${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"})
 
     podman build "${PODMAN_BUILD_ARGS[@]}" "${context}"
-
-# Build the agent sandbox guest image
-#
-# This is a plain OCI image, not a bootc image: it is the rootfs krun boots
-# inside the microVM. It is never rechunked and never `bootc container lint`ed.
-
-# Example: just build-agent-image almanacos-agent latest
-build-agent-image $target_image=agent_image_name $tag=default_tag: (build target_image tag "agent_image/Containerfile" agent_image_desc "agent_image")
 
 # Build the live ISO image (the container, not the ISO)
 #
@@ -362,15 +328,6 @@ image_name $target_image=image_name:
     set -eoux pipefail
 
     echo "${image_name}"
-
-# Agent Image Name
-[group('Utility')]
-[private]
-agent_image_name:
-    #!/usr/bin/env bash
-    set -eoux pipefail
-
-    echo "${agent_image_name}"
 
 # Command: _rootful_load_image
 # Description: This script checks if the current user is root or running under sudo. If not, it attempts to resolve the image tag using podman inspect.
@@ -621,7 +578,7 @@ format:
     /usr/bin/find . -iname "*.sh" -type f -exec shfmt --write "{}" ';'
 
 # Verify the currently pinned microsandbox release attestation.
-[group('Agent sandbox')]
+[group('Microsandbox')]
 verify-microsandbox:
     #!/usr/bin/bash
     set -euo pipefail
@@ -641,7 +598,7 @@ verify-microsandbox:
     echo "microsandbox v${version} verified and pin matches"
 
 # Bump the pinned microsandbox version, verifying before writing.
-[group('Agent sandbox')]
+[group('Microsandbox')]
 bump-microsandbox version:
     #!/usr/bin/bash
     set -euo pipefail

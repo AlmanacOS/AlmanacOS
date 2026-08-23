@@ -6,7 +6,6 @@ FROM scratch AS ctx
 COPY --from=brew /system_files /system_files
 COPY build_files /
 COPY system_files /system_files
-COPY agent_image /agent_image
 
 # >>> microsandbox pin — managed by `just bump-microsandbox`, do not hand-edit.
 # The digest is written only after `gh release verify-asset` validates the

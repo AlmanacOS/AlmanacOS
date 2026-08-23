@@ -30,9 +30,9 @@ ostreecontainer --url=@PAYLOAD_IMAGE@ --transport=containers-storage --no-signat
 # today and is *not* the right long-term answer: these images are cosign-signed
 # by CI and the public key already ships at /etc/pki/containers/almanacos.pub.
 # Turning that on is two changes — `ostree-image-signed:docker://` here, and a
-# sigstoreSigned entry for this repository in
-# system_files/usr/share/almanac/agent-policy.json, which currently scopes only
-# the agent image. It is left out deliberately: a policy that rejects the base
+# sigstoreSigned entry for this repository merged into
+# /etc/containers/policy.json by build_files/build.sh. It is left out
+# deliberately: a policy that rejects the base
 # image breaks `bootc upgrade` on every machine that has already deployed the
 # image carrying that policy, and recovering means a rollback. That is a change
 # worth making on purpose, with a test machine, rather than as a side effect of
