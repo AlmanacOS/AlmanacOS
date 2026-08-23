@@ -1,0 +1,12 @@
+[Unit]
+Description=Remove Fedora flatpak repositories from the user installation
+Documentation=man:flatpak(1)
+ConditionPathExists=/usr/bin/flatpak
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/almanac-flatpak-nuke-fedora --user
+
+[Install]
+WantedBy=default.target

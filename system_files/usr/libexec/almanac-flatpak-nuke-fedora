@@ -1,0 +1,64 @@
+#!/usr/bin/bash
+# Remove Fedora's Flatpak remotes and everything installed from them, so the
+# image converges on Flathub alone. Run once per installation scope: as root by
+# flatpak-nuke-fedora.service for --system, and per-user by
+# almanac-flatpak-nuke-fedora.service for --user (a system unit cannot reach
+# ~/.local/share/flatpak).
+set -euo pipefail
+
+scope="${1:---system}"
+case "$scope" in
+    --system | --user) ;;
+    *)
+        echo "usage: ${0##*/} [--system|--user]" >&2
+        exit 2
+        ;;
+esac
+
+remotes=(fedora fedora-testing)
+removed_any=0
+
+# Uninstall every app and runtime whose origin is $1.
+uninstall_from_remote() {
+    local remote="$1"
+    local refs=()
+
+    mapfile -t refs < <(
+        flatpak list "$scope" --app --runtime --columns=ref,origin |
+            awk -F'\t' -v origin="$remote" '$2 == origin { print $1 }'
+    )
+
+    if [[ ${#refs[@]} -eq 0 ]]; then
+        return
+    fi
+
+    echo "removing ${#refs[@]} ref(s) with origin $remote ($scope)"
+    flatpak uninstall "$scope" -y --noninteractive "${refs[@]}"
+    removed_any=1
+}
+
+for remote in "${remotes[@]}"; do
+    uninstall_from_remote "$remote"
+
+    # remote-delete fails on a remote that was never configured, which is the
+    # normal case on a fresh install - so check first rather than swallowing
+    # every failure with SuccessExitStatus=.
+    if flatpak remotes "$scope" --columns=name | grep -qxF "$remote"; then
+        echo "deleting remote $remote ($scope)"
+        flatpak remote-delete "$scope" --force "$remote"
+        removed_any=1
+    fi
+done
+
+# Sweep runtimes orphaned by the apps above - but only if we actually removed
+# something, so this is not a recurring garbage collection of the user's own
+# flatpaks on every login.
+if [[ "$removed_any" -eq 1 ]]; then
+    flatpak uninstall "$scope" --unused -y --noninteractive || true
+fi
+
+if [[ "$scope" == "--system" ]]; then
+    # Sentinel that stops flatpak-add-fedora-repos.service re-adding the remotes.
+    mkdir -p /var/lib/flatpak
+    touch /var/lib/flatpak/.fedora-initialized
+fi

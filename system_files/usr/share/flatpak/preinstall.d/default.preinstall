@@ -6,7 +6,7 @@ IsRuntime=false
 Branch=stable
 IsRuntime=false
 
-[Flatpak Preinstall org.io.github.DenysMb.Kontainer]
+[Flatpak Preinstall io.github.DenysMb.Kontainer]
 Branch=stable
 IsRuntime=false
 

@@ -611,3 +611,22 @@ bump-microsandbox version:
     digest=$(sha256sum "${tmp}/${asset}" | cut -d' ' -f1)
     sed -i -E "s|^ADD --checksum=sha256:[0-9a-f]+ .*microsandbox-linux-x86_64\.tar\.gz /microsandbox\.tar\.gz$|ADD --checksum=sha256:${digest} https://github.com/${repo}/releases/download/v{{ version }}/${asset} /microsandbox.tar.gz|" Containerfile
     echo "pinned microsandbox v{{ version }} -> sha256:${digest}"
+
+# Refresh the vendored Flathub remote definition from dl.flathub.org.
+[group('Flatpak')]
+bump-flathub-repo:
+    #!/usr/bin/bash
+    set -euo pipefail
+    dest="system_files/usr/share/flatpak/remotes.d/flathub.flatpakrepo"
+    tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
+    curl -fsSL --retry 3 https://dl.flathub.org/repo/flathub.flatpakrepo -o "$tmp"
+    # A truncated or error-page download must not overwrite a working remote.
+    grep -q '^\[Flatpak Repo\]$' "$tmp"
+    grep -q '^Url=https://dl\.flathub\.org/repo/$' "$tmp"
+    grep -q '^GPGKey=' "$tmp"
+    if cmp -s "$tmp" "$dest"; then
+        echo "flathub.flatpakrepo already current"
+    else
+        cp "$tmp" "$dest"
+        echo "updated $dest"
+    fi

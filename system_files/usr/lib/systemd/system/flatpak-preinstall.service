@@ -2,17 +2,24 @@
 Description=Preinstall Flatpaks
 After=network-online.target
 Wants=network-online.target
+# Flathub is preconfigured statically via /usr/share/flatpak/remotes.d, but the
+# base image still touches remotes at boot - and the Fedora remotes must be gone
+# before we resolve any refs.
+After=flatpak-add-flathub-repos.service
+After=flatpak-nuke-fedora.service
 ConditionPathExists=/usr/bin/flatpak
 Documentation=man:flatpak-preinstall(1)
-StartLimitIntervalSec=600
+# A cold first boot can take a while to get a usable network; give it a real
+# retry budget. Both StartLimit* settings only take effect in [Unit].
+StartLimitIntervalSec=3600
+StartLimitBurst=5
 
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/flatpak preinstall -y
 RemainAfterExit=true
 Restart=on-failure
-RestartSec=30
-StartLimitBurst=3
+RestartSec=60
 
 [Install]
 WantedBy=multi-user.target

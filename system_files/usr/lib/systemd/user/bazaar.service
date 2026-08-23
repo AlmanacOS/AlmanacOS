@@ -6,14 +6,18 @@
 Description=Bazaar background service
 Documentation=https://github.com/bazaar-org/bazaar
 After=graphical-session.target
-StartLimitBurst=10
+# Bazaar itself is a flatpak, pulled by flatpak-preinstall.service, so on a first
+# boot this will fail until that download lands. Retry for ~15 minutes, then stop
+# rather than spin forever if the user has uninstalled Bazaar.
+StartLimitIntervalSec=1800
+StartLimitBurst=30
 
 [Service]
 Type=simple
 ExecStart=flatpak run --command=bazaar io.github.kolunmi.Bazaar --no-window
 StandardOutput=journal
 Restart=on-failure
-RestartSec=5
+RestartSec=30
 
 [Install]
 WantedBy=graphical-session.target

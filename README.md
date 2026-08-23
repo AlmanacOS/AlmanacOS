@@ -40,9 +40,12 @@ including the part where it says nobody has booted one yet.
 - **`ujust almanac-*`** recipes for offline model import and APU memory tuning.
 - **Homebrew**, unpacked on first boot, plus `podman.socket`, `tmux`, `jq`,
   `amdgpu_top`.
+- **Bazaar** as the app store in place of Discover, which is removed. Flathub is
+  preconfigured system-wide.
 - Flatpaks pulled on first boot, network permitting: Bazaar, Alpaca, Haruna,
-  Kontainer, Flatseal, Mission Center, Upscayl. Fedora's Flatpak remotes are
-  removed in favour of Flathub.
+  Kontainer, Flatseal, Mission Center, Upscayl. Fedora's Flatpak remotes - and
+  anything already installed from them - are removed on first boot, from both
+  the system and per-user installations.
 
 ## Running a model
 
