@@ -1,0 +1,359 @@
+#!/usr/bin/bash
+# almanac-devmode — install developer tooling into the user's home, on demand.
+#
+# Nothing here is baked into the image. Every tool this script installs comes
+# from Homebrew or Flathub at the moment the user asks for it, lands in $HOME or
+# in the system Flatpak installation, and can be removed without rebuilding or
+# rebasing anything. That is the whole point: AlmanacOS is an image for running
+# models, and a developer toolchain has no business growing the base image for
+# the majority of users who will never open an IDE on it.
+#
+# The consequence is that this script needs a network and the rest of AlmanacOS
+# does not. `preflight` exists to make that boundary legible — an air-gapped
+# machine gets a sentence naming what would have been downloaded, rather than a
+# Homebrew stack trace about a DNS failure. The offline guarantee AlmanacOS
+# makes is about *running models*; it was never a claim that you could install
+# Visual Studio Code from a USB stick.
+#
+# Ported from Bluefin, which is Apache-2.0 like AlmanacOS:
+#   projectbluefin/common, system_files/bluefin/usr/share/ublue-os/just/system.just
+#   recipe `toggle-devmode`, commit dcfa738ddbae43c7583529acdb45b617abba83ea
+# The menu structure and the _dx_wants/_dx_add/_dx_bar/_dx_step progress-bar
+# helpers are theirs, lightly adapted. Two things are deliberately not theirs;
+# both are noted at the point where they differ (see install_docker and the
+# absence of incus).
+
+set -euo pipefail
+
+readonly BREWFILE_DIR=/usr/share/almanac/homebrew
+readonly MARKER="${HOME}/.config/almanac/devmode"
+
+# Hosts the install queue actually reaches for. Homebrew resolves formulae
+# against formulae.brew.sh and pulls bottles from ghcr.io; Flatpak pulls from
+# Flathub's CDN. Probing all three keeps the offline message honest rather than
+# inferring reachability from one lucky host.
+readonly PROBE_HOSTS=(
+    https://formulae.brew.sh
+    https://ghcr.io
+    https://dl.flathub.org
+)
+
+die() { printf 'almanac-devmode: %s\n' "$*" >&2; exit 1; }
+
+brew_bin() {
+    if command -v brew >/dev/null 2>&1; then
+        command -v brew
+    elif [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+        printf '/home/linuxbrew/.linuxbrew/bin/brew'
+    else
+        die "Homebrew is not installed yet. It unpacks on first boot; if this is a fresh machine, reboot and try again."
+    fi
+}
+
+# Homebrew is not on PATH in a non-login shell, and `brew bundle` shells out to
+# `brew` by name. Put it there for the duration of this script.
+init_brew() {
+    local bin; bin=$(brew_bin)
+    eval "$("$bin" shellenv)"
+}
+
+# Any HTTP response at all counts as reachable: it proves DNS, TCP and TLS
+# worked, which is the actual question. Deliberately no -f — ghcr.io answers 405
+# to a HEAD on /, and a status code is still a reachable host. curl only exits
+# non-zero here for the failures we care about (6 resolve, 7 connect, 28 timeout,
+# 35 TLS).
+reachable() {
+    local host
+    for host in "${PROBE_HOSTS[@]}"; do
+        curl -sS --head --max-time 5 -o /dev/null "$host" >/dev/null 2>&1 || return 1
+    done
+}
+
+cmd_preflight() {
+    if reachable; then
+        return 0
+    fi
+
+    cat >&2 <<'EOF'
+
+  devmode needs a network.
+
+  It would have fetched, from Homebrew and Flathub:
+    • devcontainer CLI
+    • docker, docker-compose, lazydocker, dive
+    • io.podman_desktop.PodmanDesktop
+    ...and whatever else you picked from the menu.
+
+  AlmanacOS runs models offline; developer tooling is an online opt-in.
+  Nothing was changed.
+
+EOF
+    exit 1
+}
+
+# --- menu ------------------------------------------------------------------
+
+# Section headers are selectable in gum, so every test below matches the leading
+# two-space indent that only real entries carry. Upstream relies on the same
+# trick; -F where a label is a substring of another ("  Docker" is inside
+# "  Docker Desktop"-shaped strings, "  vim" is inside "Neovim").
+_dx_wants() { printf '%s\n' "${CHOICES}" | grep -q "$@"; }
+
+_dx_add() { DX_NAMES+=("$1"); DX_CMDS+=("$2"); }
+
+_dx_bar() {
+    local done=$1 total=$2 width=28 bar="" i
+    local filled=$(( done * width / total ))
+    for ((i = 0; i < filled; i++)); do bar+="█"; done
+    for ((i = 0; i < (width - filled); i++)); do bar+="░"; done
+    printf '%s' "${bar}"
+}
+
+_dx_step() {
+    local idx=$1 total=$2 name=$3; shift 3
+    local bar; bar="$(_dx_bar "${idx}" "${total}")"
+    local digits=${#total} label
+    printf -v label "%*d/%*d" "${digits}" "$((idx + 1))" "${digits}" "${total}"
+    if gum spin --spinner dot --title " ${bar}  ${label}  ${name}" -- "$@"; then
+        gum style --foreground 42 "✓ ${name}"
+    else
+        gum style --foreground 196 "✗ ${name}" >&2
+        return 1
+    fi
+}
+
+choose() {
+    gum choose --no-limit \
+        --height 20 \
+        --selected-prefix "◉  " \
+        --unselected-prefix "○  " \
+        --cursor "▸  " \
+        --selected "  Docker CLI,  Podman Desktop" \
+        "── Containers ───────────────────────────────" \
+        "  Docker CLI" \
+        "  Podman Desktop" \
+        "── Virtualization ───────────────────────────" \
+        "  Virtual Machines (virt-manager + QEMU)" \
+        "── IDE ──────────────────────────────────────" \
+        "  VS Code" \
+        "  VSCodium" \
+        "  Zed" \
+        "  JetBrains Toolbox" \
+        "── CLI Editors ──────────────────────────────" \
+        "  Neovim" \
+        "  Helix" \
+        "  vim" \
+        "  micro" \
+        "── Kubernetes ───────────────────────────────" \
+        "  Kubernetes tools" \
+        "  CNCF tools" || true
+}
+
+# The one real departure from Bluefin. `brew install docker` ships the CLI and
+# nothing else — upstream gets away with it because the daemon comes from
+# docker-ce baked into their -dx image, which means that on plain bluefin:lts
+# picking Docker leaves you with a client and nothing listening. AlmanacOS
+# already enables podman.socket, so point the client at rootless Podman instead
+# of installing a second container runtime. Rootless means no docker group, and
+# environment.d expands XDG_RUNTIME_DIR, which the user manager always sets.
+configure_docker_host() {
+    local dir="${HOME}/.config/environment.d"
+    mkdir -p "$dir"
+    cat > "${dir}/10-almanac-docker-host.conf" <<'EOF'
+# Written by `ujust devmode`. The docker CLI installed from Homebrew has no
+# daemon of its own; AlmanacOS points it at the rootless Podman socket.
+DOCKER_HOST=unix://${XDG_RUNTIME_DIR}/podman/podman.sock
+EOF
+    systemctl --user enable --now podman.socket >/dev/null 2>&1 ||
+        printf 'warning: could not start the rootless podman socket; run `systemctl --user enable --now podman.socket`\n' >&2
+}
+
+# Ported verbatim in spirit from projectbluefin/common,
+# system_files/bluefin/usr/libexec/ensure-libvirt-session-config,
+# commit cb1651c17eb06eba88c8d2f54d07cceff701a014.
+configure_libvirt_session() {
+    local dir="${HOME}/.config/libvirt"
+    local file="${dir}/libvirt.conf"
+    local uri='uri_default = "qemu:///session"'
+    mkdir -p "$dir"
+    grep -qxF "$uri" "$file" 2>/dev/null || printf '%s\n' "$uri" >> "$file"
+}
+
+# Build the install queue from CHOICES. Sets DX_NAMES/DX_CMDS in parallel, plus
+# the two flags whose post-install steps need to run after the queue drains.
+# Split out from cmd_menu so `plan` can show the queue without a TTY, and so the
+# substring matching above can be tested without installing anything.
+build_queue() {
+    INSTALL_DOCKER=0
+    INSTALL_LIBVIRT=0
+    _dx_wants -F "  Docker CLI"     && INSTALL_DOCKER=1
+    _dx_wants    "Virtual Machines" && INSTALL_LIBVIRT=1
+
+    DX_NAMES=("devcontainer CLI")
+    DX_CMDS=("brew install devcontainer")
+    (( INSTALL_DOCKER )) && _dx_add "Docker CLI" "brew install docker docker-compose lazydocker dive"
+    _dx_wants "Podman Desktop"   && _dx_add "Podman Desktop" "flatpak install --system --noninteractive flathub io.podman_desktop.PodmanDesktop"
+    (( INSTALL_LIBVIRT ))        && _dx_add "Virtual Machines" "flatpak install --system --noninteractive flathub org.virt_manager.virt-manager org.virt_manager.virt_manager.Extension.Qemu"
+    _dx_wants -F "  VS Code"     && _dx_add "VS Code" "brew install --cask ublue-os/tap/visual-studio-code-linux"
+    _dx_wants "VSCodium"         && _dx_add "VSCodium" "brew install --cask ublue-os/tap/vscodium-linux"
+    _dx_wants -F "  Zed"         && _dx_add "Zed" "brew install --cask ublue-os/experimental-tap/zed-linux"
+    _dx_wants "JetBrains"        && _dx_add "JetBrains Toolbox" "brew install --cask ublue-os/tap/jetbrains-toolbox-linux"
+    _dx_wants "Neovim"           && _dx_add "Neovim" "brew install nvim"
+    _dx_wants "Helix"            && _dx_add "Helix" "brew install helix"
+    _dx_wants -F "  vim"         && _dx_add "vim" "brew install vim"
+    _dx_wants "micro"            && _dx_add "micro" "brew install micro"
+    _dx_wants "Kubernetes tools" && _dx_add "Kubernetes tools" "brew bundle --file=${BREWFILE_DIR}/k8s-tools.Brewfile"
+    _dx_wants "CNCF tools"       && _dx_add "CNCF tools" "brew bundle --file=${BREWFILE_DIR}/cncf.Brewfile"
+
+    # `&&` on a false test is the last command in this function; without this the
+    # function would inherit its non-zero status and set -e would abort.
+    return 0
+}
+
+# Taps are fast and quiet, so they run before the progress bar rather than
+# inside it, where a tap's own output would fight the spinner.
+add_taps() {
+    if _dx_wants -E "VS Code|VSCodium|JetBrains"; then
+        brew tap --trust ublue-os/tap
+    fi
+    if _dx_wants -F "  Zed"; then
+        brew tap --trust ublue-os/experimental-tap
+    fi
+}
+
+cmd_plan() {
+    # `+x` not `:-`: an override that is set but empty means "the user picked
+    # nothing", which is a real answer and must not fall back to the menu.
+    if [[ -n "${ALMANAC_DEVMODE_CHOICES+x}" ]]; then
+        CHOICES="$ALMANAC_DEVMODE_CHOICES"
+    else
+        CHOICES="$(choose)"
+    fi
+    build_queue
+    local i
+    for i in "${!DX_NAMES[@]}"; do
+        printf '%s\t%s\n' "${DX_NAMES[$i]}" "${DX_CMDS[$i]}"
+    done
+}
+
+cmd_menu() {
+    command -v gum >/dev/null 2>&1 || die "gum is not installed; the image is built wrong"
+    cmd_preflight
+    init_brew
+
+    gum style \
+        --foreground 212 --border-foreground 212 --border double \
+        --align center --width 60 --padding "1 4" \
+        "AlmanacOS Developer Mode"
+    echo ""
+
+    if [[ -f "$MARKER" ]]; then
+        gum confirm "Developer mode is already set up. Add more tools?" || exit 0
+        echo ""
+    fi
+
+    # `+x` not `:-`: an override that is set but empty means "the user picked
+    # nothing", which is a real answer and must not fall back to the menu.
+    if [[ -n "${ALMANAC_DEVMODE_CHOICES+x}" ]]; then
+        CHOICES="$ALMANAC_DEVMODE_CHOICES"
+    else
+        CHOICES="$(choose)"
+    fi
+    build_queue
+
+    echo ""
+    local summary
+    summary=$(
+        gum style --bold "Ready to install:"
+        printf '  ● %s\n' "${DX_NAMES[@]}"
+    )
+    gum style --border rounded --border-foreground 212 --padding "1 3" --width 50 "${summary}"
+    echo ""
+
+    gum confirm "Install now?" || exit 0
+    echo ""
+
+    add_taps
+
+    local n=${#DX_NAMES[@]} i
+    for i in "${!DX_NAMES[@]}"; do
+        _dx_step "$i" "$n" "${DX_NAMES[$i]}" bash -c "${DX_CMDS[$i]}" || exit 1
+    done
+
+    (( INSTALL_DOCKER )) && configure_docker_host
+    (( INSTALL_LIBVIRT )) && configure_libvirt_session
+
+    # dialout is unconditional (serial consoles), libvirt only when asked for.
+    # incus-admin is absent because incus is absent: it needs a system daemon,
+    # which is exactly the thing this design avoids. Docker needs no group at
+    # all here, because the socket it talks to is the user's own.
+    local groups="dialout"
+    (( INSTALL_LIBVIRT )) && groups="${groups} libvirt"
+    apply_groups "$groups"
+
+    mkdir -p "$(dirname "$MARKER")"
+    touch "$MARKER"
+
+    echo ""
+    gum style \
+        --foreground 2 --border-foreground 2 --border rounded \
+        --align center --width 60 --padding "1 4" \
+        "Developer Mode is on. Log out and back in to pick up group and environment changes."
+}
+
+# --- groups ----------------------------------------------------------------
+
+# Group membership is the one part that needs root, so it is one pkexec call
+# rather than several. Groups defined only in /usr/lib/group have to be copied
+# into /etc/group before usermod will accept them — on an image-based system
+# /etc is the writable layer and /usr/lib/group is what the image ships.
+apply_groups() {
+    local groups="$1" user; user="$(id -un)"
+
+    pkexec bash -c '
+        set -u
+        groups="$1"; user="$2"
+        for g in ${groups}; do
+            if ! grep -q "^${g}:" /etc/group 2>/dev/null; then
+                grep "^${g}:" /usr/lib/group 2>/dev/null | tee -a /etc/group >/dev/null || true
+            fi
+            usermod -aG "${g}" "${user}" 2>/dev/null || true
+        done
+    ' -- "$groups" "$user"
+}
+
+cmd_groups() {
+    apply_groups "dialout libvirt"
+    printf 'Group membership updated for %s. Log out and back in to pick it up.\n' "$(id -un)"
+}
+
+usage() {
+    cat <<'EOF'
+Usage: almanac-devmode <command>
+
+  menu        Choose and install developer tooling (default)
+  plan        Show what the current selection would install, and install nothing
+  groups      Add the current user to the developer groups and nothing else
+  preflight   Check whether the install hosts are reachable; print what would
+              have been fetched and exit non-zero if they are not
+
+Everything installs into $HOME via Homebrew, or into the system Flatpak
+installation. None of it is part of the AlmanacOS image.
+
+Set ALMANAC_DEVMODE_CHOICES to skip the menu; it takes the same newline-
+separated labels the menu emits.
+EOF
+}
+
+main() {
+    case "${1:-}" in
+        menu|'')      cmd_menu ;;
+        plan)         cmd_plan ;;
+        groups)       cmd_groups ;;
+        preflight)    cmd_preflight && printf 'Homebrew and Flathub are reachable.\n' ;;
+        -h|--help)    usage ;;
+        *)            usage; exit 1 ;;
+    esac
+}
+
+main "$@"

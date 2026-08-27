@@ -1,0 +1,274 @@
+#!/usr/bin/bash
+# almanac-ai — install terminal AI agents, and point them at a local model.
+#
+# The install half mirrors /usr/libexec/almanac-devmode: Homebrew at runtime,
+# nothing in the image, a preflight so an offline machine gets a sentence rather
+# than a stack trace. The reason this script exists separately is the other half.
+#
+# Almost every terminal coding agent speaks the OpenAI HTTP API and will talk to
+# any server that implements it, which includes both of the ones AlmanacOS
+# ships. So "use a local model" is, for most of these tools, a single base URL —
+# and getting that URL into a dozen different config formats is the actual work.
+# `backend` does that: environment.d for everything that reads OPENAI_BASE_URL,
+# and hand-written config for aichat and llm, which do not.
+#
+# This is the part with no upstream equivalent. Bluefin ships the tools and
+# leaves them pointed at their vendors' clouds, which is the right default for
+# Bluefin and the wrong one here.
+#
+# Tool list ported from Bluefin, Apache-2.0 like AlmanacOS:
+#   projectbluefin/common,
+#   system_files/shared/usr/share/ublue-os/homebrew/ai-tools.Brewfile
+#   commit 4630fb2be2126e07df0d26433462019c76cec3a6
+# Split into local/cloud sets, and Jan and LM Studio dropped — Alpaca already
+# ships in the image and covers the desktop case.
+
+set -euo pipefail
+
+readonly BREWFILE_DIR=/usr/share/almanac/homebrew
+readonly ENV_DIR="${HOME}/.config/environment.d"
+readonly ENV_FILE="${ENV_DIR}/20-almanac-ai-backend.conf"
+
+# lemond is enabled at boot and serves on 13305; ramalama serves on 8080 only
+# while someone is running `ramalama serve`. Hence the default, and hence the
+# order `auto` probes them in.
+readonly LEMONADE_URL="http://localhost:13305/v1"
+readonly RAMALAMA_URL="http://localhost:8080/v1"
+
+readonly PROBE_HOSTS=(
+    https://formulae.brew.sh
+    https://ghcr.io
+)
+
+die() { printf 'almanac-ai: %s\n' "$*" >&2; exit 1; }
+
+brew_bin() {
+    if command -v brew >/dev/null 2>&1; then
+        command -v brew
+    elif [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+        printf '/home/linuxbrew/.linuxbrew/bin/brew'
+    else
+        die "Homebrew is not installed yet. It unpacks on first boot; if this is a fresh machine, reboot and try again."
+    fi
+}
+
+init_brew() {
+    local bin; bin=$(brew_bin)
+    eval "$("$bin" shellenv)"
+}
+
+# Any HTTP response at all counts as reachable: it proves DNS, TCP and TLS
+# worked, which is the actual question. Deliberately no -f — ghcr.io answers 405
+# to a HEAD on /, and a status code is still a reachable host. curl only exits
+# non-zero here for the failures we care about (6 resolve, 7 connect, 28 timeout,
+# 35 TLS).
+reachable() {
+    local host
+    for host in "${PROBE_HOSTS[@]}"; do
+        curl -sS --head --max-time 5 -o /dev/null "$host" >/dev/null 2>&1 || return 1
+    done
+}
+
+cmd_preflight() {
+    if reachable; then
+        return 0
+    fi
+
+    cat >&2 <<'EOF'
+
+  ujust ai needs a network.
+
+  It would have fetched, from Homebrew:
+    • aichat, llm, opencode, crush, goose            (local agents)
+    • claude-code, codex, copilot-cli, gemini-cli …   (cloud agents)
+
+  AlmanacOS runs models offline; installing the tools that talk to them is an
+  online opt-in. Nothing was changed.
+
+  Already have the tools and only want to repoint them at a local server?
+  That works offline:  ujust almanac-ai-backend lemonade
+
+EOF
+    exit 1
+}
+
+# --- install ---------------------------------------------------------------
+
+cmd_menu() {
+    command -v gum >/dev/null 2>&1 || die "gum is not installed; the image is built wrong"
+    cmd_preflight
+    init_brew
+
+    gum style \
+        --foreground 212 --border-foreground 212 --border double \
+        --align center --width 60 --padding "1 4" \
+        "AlmanacOS AI Tools"
+    echo ""
+
+    local choices
+    choices="$(gum choose --no-limit \
+        --height 8 \
+        --selected-prefix "◉  " \
+        --unselected-prefix "○  " \
+        --cursor "▸  " \
+        --selected "  Local-model agents" \
+        "  Local-model agents" \
+        "  Cloud coding agents" || true)"
+
+    [[ -n "$choices" ]] || { printf 'Nothing selected.\n'; exit 0; }
+
+    printf '%s\n' "$choices" | grep -q "Cloud" && cat <<'EOF'
+
+  Note: the cloud agents each need an account and an API key from their vendor,
+  and they send your code to that vendor. They are here because they are useful,
+  not because they fit the rest of this image.
+
+EOF
+
+    gum confirm "Install now?" || exit 0
+    echo ""
+
+    if printf '%s\n' "$choices" | grep -q "Local-model"; then
+        gum spin --spinner dot --title " Local-model agents" -- \
+            brew bundle --file="${BREWFILE_DIR}/ai-local.Brewfile" ||
+            die "installing the local agent set failed"
+        gum style --foreground 42 "✓ Local-model agents"
+    fi
+
+    if printf '%s\n' "$choices" | grep -q "Cloud"; then
+        gum spin --spinner dot --title " Cloud coding agents" -- \
+            brew bundle --file="${BREWFILE_DIR}/ai-cloud.Brewfile" ||
+            die "installing the cloud agent set failed"
+        gum style --foreground 42 "✓ Cloud coding agents"
+    fi
+
+    echo ""
+    cmd_backend auto
+}
+
+# --- backend ---------------------------------------------------------------
+
+listening() { curl -fsS --max-time 2 -o /dev/null "${1}/models" 2>/dev/null; }
+
+resolve_backend() {
+    case "${1:-auto}" in
+        lemonade) printf 'lemonade %s\n' "$LEMONADE_URL" ;;
+        ramalama) printf 'ramalama %s\n' "$RAMALAMA_URL" ;;
+        auto)
+            if listening "$LEMONADE_URL"; then
+                printf 'lemonade %s\n' "$LEMONADE_URL"
+            elif listening "$RAMALAMA_URL"; then
+                printf 'ramalama %s\n' "$RAMALAMA_URL"
+            else
+                # Neither is up. lemond is the one enabled at boot, so it is the
+                # one that will most likely be up next; write it and say so.
+                printf 'lemonade %s\n' "$LEMONADE_URL"
+            fi
+            ;;
+        *) die "unknown backend '${1}'; expected lemonade, ramalama, or auto" ;;
+    esac
+}
+
+# Most agents read OPENAI_BASE_URL. environment.d reaches the systemd user
+# session, which is what desktop terminals inherit; it takes effect at next
+# login rather than in the shell that ran this.
+write_env() {
+    local url="$1"
+    mkdir -p "$ENV_DIR"
+    cat > "$ENV_FILE" <<EOF
+# Written by \`ujust almanac-ai-backend\`. Points OpenAI-compatible clients at
+# the local model server instead of a vendor cloud. Delete this file to undo.
+OPENAI_BASE_URL=${url}
+OPENAI_API_BASE=${url}
+# Local servers do not check the key, but many clients refuse to start without
+# one. This is a placeholder, not a secret.
+OPENAI_API_KEY=local
+EOF
+}
+
+# aichat does not read OPENAI_BASE_URL; it wants a client block in its own YAML.
+write_aichat() {
+    local url="$1" dir="${HOME}/.config/aichat"
+    # Nothing to configure if aichat is neither installed nor previously used.
+    command -v aichat >/dev/null 2>&1 || [[ -d "$dir" ]] || return 0
+    mkdir -p "$dir"
+    if [[ -e "${dir}/config.yaml" ]] && ! grep -q 'almanac-ai' "${dir}/config.yaml"; then
+        printf 'note: %s/config.yaml exists and was not written by us; leaving it alone.\n' "$dir" >&2
+        return 0
+    fi
+    cat > "${dir}/config.yaml" <<EOF
+# Written by \`ujust almanac-ai-backend\` (almanac-ai). Delete to undo.
+clients:
+  - type: openai-compatible
+    name: almanac
+    api_base: ${url}
+    api_key: local
+EOF
+}
+
+# llm needs models registered in its own YAML before it will route to them.
+write_llm() {
+    local url="$1" dir
+    command -v llm >/dev/null 2>&1 || return 0
+    dir="$(llm logs path 2>/dev/null | xargs dirname 2>/dev/null)" || return 0
+    [[ -n "$dir" && -d "$dir" ]] || return 0
+    if [[ -e "${dir}/extra-openai-models.yaml" ]] &&
+        ! grep -q 'almanac-ai' "${dir}/extra-openai-models.yaml"; then
+        printf 'note: %s/extra-openai-models.yaml exists and was not written by us; leaving it alone.\n' "$dir" >&2
+        return 0
+    fi
+    cat > "${dir}/extra-openai-models.yaml" <<EOF
+# Written by \`ujust almanac-ai-backend\` (almanac-ai). Delete to undo.
+- model_id: almanac
+  model_name: local
+  api_base: ${url}
+  api_key_name: null
+EOF
+}
+
+cmd_backend() {
+    local name url
+    read -r name url < <(resolve_backend "${1:-auto}")
+
+    write_env "$url"
+    write_aichat "$url"
+    write_llm "$url"
+
+    printf 'AI clients now point at %s (%s).\n' "$name" "$url"
+
+    if listening "$url"; then
+        printf 'It is answering now.\n'
+    elif [[ "$name" == lemonade ]]; then
+        printf 'It is not answering yet — check `systemctl status lemond`.\n'
+    else
+        printf 'It is not answering yet — start it with `ramalama serve <model>`.\n'
+    fi
+
+    printf 'Environment changes apply at your next login; this shell still has the old values.\n'
+}
+
+usage() {
+    cat <<'EOF'
+Usage: almanac-ai <command> [args]
+
+  menu                  Choose and install AI agent sets (default)
+  backend [which]       Point AI clients at a local model server.
+                        which: lemonade (default, :13305) | ramalama (:8080)
+                             | auto — whichever is answering
+  preflight             Check whether Homebrew is reachable
+
+`backend` works offline; `menu` does not.
+EOF
+}
+
+main() {
+    case "${1:-}" in
+        menu|'')   cmd_menu ;;
+        backend)   shift; cmd_backend "${1:-auto}" ;;
+        preflight) cmd_preflight && printf 'Homebrew is reachable.\n' ;;
+        -h|--help) usage ;;
+        *)         usage; exit 1 ;;
+    esac
+}
+
+main "$@"

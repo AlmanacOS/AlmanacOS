@@ -12,7 +12,12 @@ cp -avf "/ctx/system_files"/. /
 # List of rpmfusion packages can be found here:
 # https://mirrors.rpmfusion.org/mirrorlist?path=free/fedora/updates/43/x86_64/repoview/index.html&protocol=https&redirect=1
 
-# installl ramalama    
+# ramalama, as an RPM and not from Homebrew. Bluefin ships it in
+# ai-tools.Brewfile; AlmanacOS deliberately does not, because a machine that
+# never sees a network still needs both serving paths present at first boot.
+# The consequence is that `brew install ramalama` must stay out of
+# /usr/share/almanac/homebrew/ai-local.Brewfile — Homebrew's prefix precedes
+# /usr/bin on PATH, so a brew copy would silently shadow this one.
 dnf5 -y install ramalama
 
 # add lemonade via copr:
@@ -33,6 +38,11 @@ dnf5 -y copr disable clemperorpenguin/AlmanacOS
 
 # jq, for shell tooling that reads JSON.
 dnf5 install -y jq
+
+# gum, for the `ujust devmode` and `ujust ai` menus. /usr/bin/ugum from
+# ublue-os-just is an fzf shim covering only choose and confirm, not style or
+# spin, so it is not a substitute here.
+dnf5 install -y gum
 
 ### Bazaar replaces Discover as the app store.
 # Discover is inherited from kinoite-main (which only excludes the rpm-ostree
@@ -76,3 +86,19 @@ systemctl preset brew-upgrade.timer
 chmod +x /usr/libexec/almanac-memory
 chmod +x /usr/libexec/almanac-models
 chmod +x /usr/libexec/almanac-flatpak-nuke-fedora
+chmod +x /usr/libexec/almanac-devmode
+chmod +x /usr/libexec/almanac-ai
+chmod +x /usr/libexec/almanac-sandbox-exec
+
+# The ujust manifest is the only thing that makes any almanac recipe reachable:
+# ublue-os-just bakes a fixed import list into /usr/share/ublue-os/justfile and
+# leaves exactly one optional slot, 60-custom.just, which we fill with imports.
+# Those imports are `import?` so `just check` can parse the file in CI, where
+# these paths do not exist — which means a typo would fail silently at runtime
+# instead of loudly here. Assert it now rather than shipping dead recipes again.
+while read -r recipe; do
+    [[ -e "$recipe" ]] || {
+        echo "60-custom.just imports ${recipe}, which is not in the image" >&2
+        exit 1
+    }
+done < <(grep -oP 'import\? "\K[^"]+' /usr/share/ublue-os/just/60-custom.just)
