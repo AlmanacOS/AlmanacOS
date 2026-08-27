@@ -38,8 +38,11 @@ including the part where it says nobody has booted one yet.
 - **Lemonade** (`lemond`, enabled at boot) and **ramalama**, for serving models.
 - **microsandbox** (`msb`), for running untrusted code in a real microVM.
 - **`ujust almanac-*`** recipes for offline model import and APU memory tuning.
-- **Homebrew**, unpacked on first boot, plus `podman.socket`, `tmux`, `jq`,
+- **Homebrew**, unpacked on first boot, plus `podman.socket`, `gum`, `jq`,
   `amdgpu_top`.
+- **`ujust devmode`** and **`ujust ai`**, which install developer tooling and
+  terminal AI agents into your home directory on request. Neither is in the
+  image; both need a network.
 - **Bazaar** as the app store in place of Discover, which is removed. Flathub is
   preconfigured system-wide.
 - Flatpaks pulled on first boot, network permitting: Bazaar, Alpaca, Haruna,
@@ -60,6 +63,48 @@ lemonade chat Qwen3-0.6B-GGUF     # or point anything at localhost:13305/v1
 `lemonade run` opens the web UI; Alpaca is preinstalled if you would rather have
 a desktop client.
 
+## Developer tooling and AI agents
+
+Neither ships in the image. `ujust devmode` and `ujust ai` are installers: they
+fetch from Homebrew and Flathub at the moment you run them, into `$HOME` or the
+system Flatpak installation, and nothing they install survives a `bootc switch`
+away. That is the trade. The base image stays small for the majority of machines
+that will never open an IDE, and the tooling is not pinned to our build cadence.
+
+```bash
+ujust devmode            # containers, VMs, IDEs, editors, Kubernetes
+ujust devmode-preflight  # are the install hosts reachable?
+ujust dx-group           # just the groups, for a second user account
+ujust ai                 # terminal AI agents
+```
+
+Both refuse to start on a machine with no network, and say what they would have
+downloaded instead of failing inside Homebrew. This is the one part of AlmanacOS
+that needs the internet, and it is meant to be obvious about it.
+
+Picking Docker installs the CLI only. There is no Docker daemon here and there
+will not be one: `DOCKER_HOST` is pointed at the rootless Podman socket that is
+already enabled, which is why nothing asks to add you to a `docker` group.
+
+### Pointing agents at a local model
+
+Most terminal agents speak the OpenAI API and will talk to anything that
+implements it, including both servers on this image.
+
+```bash
+ujust almanac-ai-backend             # auto: whichever is answering
+ujust almanac-ai-backend lemonade    # localhost:13305
+ujust almanac-ai-backend ramalama    # localhost:8080
+```
+
+This writes `OPENAI_BASE_URL` into `~/.config/environment.d`, plus config for
+`aichat` and `llm`, which do not read it. It works offline — it changes where
+tools point, and downloads nothing. Environment changes apply at your next login.
+
+The developer and AI tooling is adapted from
+[Bluefin](https://projectbluefin.io), Apache-2.0 like AlmanacOS; the files that
+carry ported code cite the upstream path and commit in their headers.
+
 ## Sandboxing untrusted code
 
 `msb` runs code in a hardware-virtualised microVM, not a container - separate
@@ -73,6 +118,11 @@ msb create --name app python      # a persistent one
 msb exec app -- python -c "import this"
 msb stop app && msb rm app
 ```
+
+`almanac-sandbox-exec` wraps this for agents: point a coding agent's shell hook
+at it and the code it writes runs in a microVM instead of your session. The
+sandbox is ephemeral and your working directory is not mounted, which is the
+point rather than an oversight.
 
 It ships as a pinned prebuilt bundle rather than an RPM, installed beside its own
 forked `libkrunfw` so that fork can never shadow a packaged one.

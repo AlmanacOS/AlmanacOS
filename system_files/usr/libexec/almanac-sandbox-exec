@@ -1,0 +1,60 @@
+#!/usr/bin/bash
+# almanac-sandbox-exec — run a command inside a microVM instead of on the host.
+#
+# The use this is built for: a coding agent that wants to execute something it
+# just wrote. Point the agent's shell hook at this script and the command runs
+# under microsandbox — a separate kernel, hardware-virtualised — rather than in
+# your session. Container escape is not the threat model, which matters when the
+# thing being run was generated a second ago by a language model.
+#
+#   almanac-sandbox-exec python3 -c 'print("hello")'
+#   almanac-sandbox-exec --image node bash -lc 'node --version'
+#
+# Scope is deliberately small. AlmanacOS had a bespoke agent sandbox image once
+# and removed it in 7097881 — a second image, a second CI pipeline and ~3,000
+# lines, for isolation msb already provides. This is a shim over stock
+# microsandbox, and it should stay one. The README's roadmap entry for an agent
+# layer is about what drives this, not about reimplementing it.
+#
+# Caveats worth knowing before trusting it with anything:
+#   - The sandbox is ephemeral. Nothing written inside survives the call.
+#   - The working directory is NOT mounted. A command that expects to read your
+#     project files will not find them; that is the point, not an oversight.
+#   - Exit status is the sandboxed command's. stdout and stderr pass through.
+
+set -euo pipefail
+
+readonly DEFAULT_IMAGE=python
+
+die() { printf 'almanac-sandbox-exec: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+    cat <<'EOF'
+Usage: almanac-sandbox-exec [--image NAME] <command> [args...]
+
+  --image NAME   microsandbox image to run in (default: python)
+
+Runs the command in an ephemeral microVM via `msb run`. The current directory
+is not mounted and no state persists between calls.
+EOF
+}
+
+main() {
+    local image="$DEFAULT_IMAGE"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --image) [[ $# -ge 2 ]] || die "--image needs a value"; image="$2"; shift 2 ;;
+            -h|--help) usage; exit 0 ;;
+            --) shift; break ;;
+            *) break ;;
+        esac
+    done
+
+    [[ $# -gt 0 ]] || { usage >&2; exit 1; }
+    command -v msb >/dev/null 2>&1 || die "msb is not installed; the image is built wrong"
+
+    exec msb run "$image" -- "$@"
+}
+
+main "$@"
