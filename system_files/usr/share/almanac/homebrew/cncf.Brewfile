@@ -1,12 +1,17 @@
 # CNCF projects, installed by `ujust devmode`. Large — 89 projects, several
 # hundred formulae with their dependencies. Picking it is a deliberate act.
 #
-# Copied unchanged from Bluefin (Apache-2.0, like AlmanacOS):
+# Copied from Bluefin (Apache-2.0, like AlmanacOS):
 #   projectbluefin/common,
 #   system_files/shared/usr/share/ublue-os/homebrew/cncf.Brewfile
 #   commit 6086ae8fc11f2d4ff5403268c74cbee47c039c29
 # Upstream generates it from the CNCF Landscape (https://landscape.cncf.io/);
 # refresh it from there rather than editing entries by hand.
+#
+# One edit, which a refresh has to reapply: `trusted: true` on each tap, not
+# just kcl-lang's. Homebrew 6 refuses to load a formula from a non-official tap
+# unless the tap is in the trust store, and `brew bundle` only trusts the taps a
+# Brewfile marks.
 
 # CNCF Projects Brewfile
 # Generated from CNCF Landscape data
@@ -18,16 +23,16 @@
 
 # === TAPS ===
 # Taps for CNCF projects not in homebrew-core
-tap "dapr/tap"
-tap "buildpacks/tap"
-tap "carvel-dev/carvel"
-tap "kitops-ml/kitops"
-tap "microcks/tap"
-tap "telepresenceio/telepresence"
-tap "k0sproject/tap"
-tap "kptdev/kpt", "https://github.com/kptdev/kpt.git"
-tap "wasmcloud/wasmcloud"
-tap "artifacthub/cmd"
+tap "dapr/tap", trusted: true
+tap "buildpacks/tap", trusted: true
+tap "carvel-dev/carvel", trusted: true
+tap "kitops-ml/kitops", trusted: true
+tap "microcks/tap", trusted: true
+tap "telepresenceio/telepresence", trusted: true
+tap "k0sproject/tap", trusted: true
+tap "kptdev/kpt", "https://github.com/kptdev/kpt.git", trusted: true
+tap "wasmcloud/wasmcloud", trusted: true
+tap "artifacthub/cmd", trusted: true
 # tap "pingcap/brew"
 tap "kcl-lang/tap", trusted: true
 

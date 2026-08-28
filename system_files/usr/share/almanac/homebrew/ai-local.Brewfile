@@ -16,9 +16,13 @@
 #
 #   `aichat` is added, which upstream dropped. It is the best fit here: a small
 #   client with first-class support for an arbitrary OpenAI-compatible base URL.
+#
+# `trusted: true` on every tap, not just ublue-os's: Homebrew 6 refuses to load
+# a formula from a non-official tap unless the tap is in the trust store, and
+# `brew bundle` only trusts the taps a Brewfile marks.
 
-tap "anomalyco/tap"
-tap "charmbracelet/tap"
+tap "anomalyco/tap", trusted: true
+tap "charmbracelet/tap", trusted: true
 tap "ublue-os/tap", trusted: true
 
 brew "aichat"
