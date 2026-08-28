@@ -194,9 +194,14 @@ build_queue() {
     (( INSTALL_DOCKER )) && _dx_add "Docker CLI" "brew install docker docker-compose lazydocker dive"
     _dx_wants "Podman Desktop"   && _dx_add "Podman Desktop" "flatpak install --system --noninteractive flathub io.podman_desktop.PodmanDesktop"
     (( INSTALL_LIBVIRT ))        && _dx_add "Virtual Machines" "flatpak install --system --noninteractive flathub org.virt_manager.virt-manager org.virt_manager.virt_manager.Extension.Qemu"
+    # The IDE casks name their tap in full. `brew install` taps what it needs
+    # and, since Homebrew 6, adds a fully-qualified third-party name to the
+    # trust store on the spot — a plain `brew install --cask user/tap/thing`
+    # is both the tap step and the `brew trust` step. Without the tap in the
+    # name, Homebrew refuses to load the cask at all.
     _dx_wants -F "  VS Code"     && _dx_add "VS Code" "brew install --cask ublue-os/tap/visual-studio-code-linux"
     _dx_wants "VSCodium"         && _dx_add "VSCodium" "brew install --cask ublue-os/tap/vscodium-linux"
-    _dx_wants -F "  Zed"         && _dx_add "Zed" "brew install --cask ublue-os/experimental-tap/zed-linux"
+    _dx_wants -F "  Zed"         && _dx_add "Zed" "brew install --cask ublue-os/tap/zed-linux"
     _dx_wants "JetBrains"        && _dx_add "JetBrains Toolbox" "brew install --cask ublue-os/tap/jetbrains-toolbox-linux"
     _dx_wants "Neovim"           && _dx_add "Neovim" "brew install nvim"
     _dx_wants "Helix"            && _dx_add "Helix" "brew install helix"
@@ -208,17 +213,6 @@ build_queue() {
     # `&&` on a false test is the last command in this function; without this the
     # function would inherit its non-zero status and set -e would abort.
     return 0
-}
-
-# Taps are fast and quiet, so they run before the progress bar rather than
-# inside it, where a tap's own output would fight the spinner.
-add_taps() {
-    if _dx_wants -E "VS Code|VSCodium|JetBrains"; then
-        brew tap --trust ublue-os/tap
-    fi
-    if _dx_wants -F "  Zed"; then
-        brew tap --trust ublue-os/experimental-tap
-    fi
 }
 
 cmd_plan() {
@@ -272,8 +266,6 @@ cmd_menu() {
 
     gum confirm "Install now?" || exit 0
     echo ""
-
-    add_taps
 
     local n=${#DX_NAMES[@]} i
     for i in "${!DX_NAMES[@]}"; do
