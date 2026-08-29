@@ -10,7 +10,7 @@ COPY system_files /system_files
 # >>> microsandbox pin — managed by `just bump-microsandbox`, do not hand-edit.
 # The digest is written only after `gh release verify-asset` validates the
 # GitHub release attestation (release↔tag↔asset binding, NOT build provenance).
-ADD --checksum=sha256:0b39d98700feb75063e79e28feedc37e1cd7cae0654c3913829ecf101232ca7f https://github.com/superradcompany/microsandbox/releases/download/v0.6.12/microsandbox-linux-x86_64.tar.gz /microsandbox.tar.gz
+ADD --checksum=sha256:a9a22ddacdb36ebd214ad042ac2c18ca3daf5e7f1ac8f2fba522085aab6e8b57 https://github.com/superradcompany/microsandbox/releases/download/v0.6.16/microsandbox-linux-x86_64.tar.gz /microsandbox.tar.gz
 
 # Base Image
 FROM ghcr.io/ublue-os/kinoite-main:latest
