@@ -29,6 +29,13 @@ set -ouex pipefail
 MSB_TARBALL="/ctx/microsandbox.tar.gz"
 MSB_LIBEXEC="/usr/libexec/microsandbox"
 
+# The pin is enforced HERE, not at the ADD that fetched the tarball: buildah's
+# ADD accepts only --chmod and --chown, so `--checksum=` is not available to us.
+# MSB_SHA256 comes from the Containerfile ARG through build.sh's environment;
+# refuse to extract an unpinned download rather than silently trusting it.
+: "${MSB_SHA256:?MSB_SHA256 was not passed through from the Containerfile}"
+echo "${MSB_SHA256}  ${MSB_TARBALL}" | sha256sum -c -
+
 extract_dir="$(mktemp -d)"
 tar -xzf "$MSB_TARBALL" -C "$extract_dir"
 
