@@ -33,7 +33,7 @@ dnf5 -y copr disable clemperorpenguin/lemonade
 
 # AlmanacOS RPMs via copr
 dnf5 -y copr enable clemperorpenguin/AlmanacOS
-dnf5 -y install amdgpu_top almanac-model-fetch
+dnf5 -y install amdgpu_top almanac-model-fetch ripwire
 dnf5 -y copr disable clemperorpenguin/AlmanacOS
 
 # jq, for shell tooling that reads JSON.
