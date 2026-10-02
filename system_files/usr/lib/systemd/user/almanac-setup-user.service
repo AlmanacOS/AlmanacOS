@@ -1,0 +1,14 @@
+[Unit]
+Description=Apply AlmanacOS setup choices for this user
+Documentation=file:///usr/libexec/almanac-setup
+# Not for plasma-setup, the system account the wizard itself runs as.
+ConditionUser=!@system
+ConditionPathExists=/etc/plasma-setup-done
+ConditionPathExists=/var/lib/almanac-setup/choices/choices.ini
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/almanac-setup apply-user
+
+[Install]
+WantedBy=default.target

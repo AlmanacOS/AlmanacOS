@@ -1,0 +1,17 @@
+[Unit]
+Description=Apply AlmanacOS setup choices (Flatpaks, model server)
+Documentation=file:///usr/libexec/almanac-setup
+After=network-online.target almanac-setup-gate.service
+Wants=network-online.target
+After=flatpak-nuke-fedora.service
+ConditionPathExists=/etc/plasma-setup-done
+# Same retry budget as flatpak-preinstall.service: a cold first boot can take a
+# while to get a usable network. Offline past that, the next boot tries again.
+StartLimitIntervalSec=3600
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/almanac-setup apply-system
+Restart=on-failure
+RestartSec=60

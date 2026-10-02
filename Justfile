@@ -577,42 +577,6 @@ format:
     # Run shfmt on all Bash scripts
     /usr/bin/find . -iname "*.sh" -type f -exec shfmt --write "{}" ';'
 
-# Verify the currently pinned microsandbox release attestation.
-[group('Microsandbox')]
-verify-microsandbox:
-    #!/usr/bin/bash
-    set -euo pipefail
-    repo="superradcompany/microsandbox"
-    asset="microsandbox-linux-x86_64.tar.gz"
-    version=$(grep -oP '^ARG MSB_VERSION="\K[0-9.]+' Containerfile)
-    pinned=$(grep -oP '^ARG MSB_SHA256="\K[0-9a-f]{64}' Containerfile)
-    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-    gh release download "v${version}" --repo "$repo" --pattern "$asset" --dir "$tmp"
-    gh release verify "v${version}" --repo "$repo"
-    gh release verify-asset "v${version}" "${tmp}/${asset}" --repo "$repo"
-    actual=$(sha256sum "${tmp}/${asset}" | cut -d' ' -f1)
-    if [ "$actual" != "$pinned" ]; then
-        echo "PIN MISMATCH: Containerfile has $pinned, release has $actual" >&2
-        exit 1
-    fi
-    echo "microsandbox v${version} verified and pin matches"
-
-# Bump the pinned microsandbox version, verifying before writing.
-[group('Microsandbox')]
-bump-microsandbox version:
-    #!/usr/bin/bash
-    set -euo pipefail
-    repo="superradcompany/microsandbox"
-    asset="microsandbox-linux-x86_64.tar.gz"
-    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-    gh release download "v{{ version }}" --repo "$repo" --pattern "$asset" --dir "$tmp"
-    gh release verify "v{{ version }}" --repo "$repo"
-    gh release verify-asset "v{{ version }}" "${tmp}/${asset}" --repo "$repo"
-    digest=$(sha256sum "${tmp}/${asset}" | cut -d' ' -f1)
-    sed -i -E "s|^ARG MSB_VERSION=\"[0-9.]+\"$|ARG MSB_VERSION=\"{{ version }}\"|" Containerfile
-    sed -i -E "s|^ARG MSB_SHA256=\"[0-9a-f]+\"$|ARG MSB_SHA256=\"${digest}\"|" Containerfile
-    echo "pinned microsandbox v{{ version }} -> sha256:${digest}"
-
 # Refresh the vendored Flathub remote definition from dl.flathub.org.
 [group('Flatpak')]
 bump-flathub-repo:

@@ -59,8 +59,17 @@ if rpm -q fedora-flatpak-repo > /dev/null 2>&1; then
     dnf5 -y remove fedora-flatpak-repo
 fi
 
-# microsandbox prebuilt runtime (see script header for why it is not an RPM).
-/ctx/microsandbox.sh
+### KDE Initial System Setup (plasma-setup) as the first-boot wizard.
+# Installed explicitly rather than trusted to come with the base: the AlmanacOS
+# pages in /usr/share/plasma/packages/org.almanacos.setup.* are plugins for it,
+# and almanac-setup-gate.service decides when it runs — on new installs, on a
+# rebase onto this image, and on upgrades that bump
+# /usr/share/almanac/setup/flow-version. See /usr/libexec/almanac-setup.
+dnf5 -y install plasma-setup
+systemctl enable plasma-setup.service
+systemctl enable almanac-setup-gate.service
+systemctl enable almanac-setup-apply.path
+systemctl --global enable almanac-setup-user.service
 
 #### Example for enabling a System Unit File
 systemctl enable podman.socket
@@ -88,7 +97,7 @@ chmod +x /usr/libexec/almanac-models
 chmod +x /usr/libexec/almanac-flatpak-nuke-fedora
 chmod +x /usr/libexec/almanac-devmode
 chmod +x /usr/libexec/almanac-ai
-chmod +x /usr/libexec/almanac-sandbox-exec
+chmod +x /usr/libexec/almanac-setup
 
 # The ujust manifest is the only thing that makes any almanac recipe reachable:
 # ublue-os-just bakes a fixed import list into /usr/share/ublue-os/justfile and

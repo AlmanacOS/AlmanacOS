@@ -1,0 +1,18 @@
+{
+    "KPackageStructure": "KDE/PlasmaSetup",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "AlmanacOS"
+            }
+        ],
+        "Description": "Choose recommended apps to install after setup.",
+        "Id": "org.almanacos.setup.apps",
+        "License": "Apache-2.0",
+        "Name": "Recommended Apps",
+        "Version": "1.0"
+    },
+    "NoDisplay": true,
+    "X-KDE-ParentApp": "org.kde.plasmasetup",
+    "X-KDE-Weight": 60
+}

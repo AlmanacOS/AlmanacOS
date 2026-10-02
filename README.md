@@ -9,10 +9,9 @@ an update goes wrong.
 
 Working offline is the constraint the rest of the design falls out of, not a
 feature bolted on the side. Models arrive on a USB drive and are checked against
-a key you carried here separately; the one component that is not an RPM is
-pinned by digest; the live ISO installs out of container storage on the disc,
-because on a machine with no network a registry transport would mean the ISO
-cannot install the OS it is an ISO of.
+a key you carried here separately; the live ISO installs out of container
+storage on the disc, because on a machine with no network a registry transport
+would mean the ISO cannot install the OS it is an ISO of.
 
 **Status:** the image builds and publishes to `ghcr.io/almanacos/almanacos`,
 cosign-signed by CI. Two things are not done - the live ISO is wired up end to
@@ -36,7 +35,8 @@ including the part where it says nobody has booted one yet.
 ## What's in it
 
 - **Lemonade** (`lemond`, enabled at boot) and **ramalama**, for serving models.
-- **microsandbox** (`msb`), for running untrusted code in a real microVM.
+- **A setup wizard** (KDE's Plasma Setup) with AlmanacOS pages for choosing
+  apps and a model server. See [First-boot setup](#first-boot-setup).
 - **`ujust almanac-*`** recipes for offline model import and APU memory tuning.
 - **Homebrew**, unpacked on first boot, plus `podman.socket`, `gum`, `jq`,
   `amdgpu_top`.
@@ -49,6 +49,26 @@ including the part where it says nobody has booted one yet.
   Kontainer, Flatseal, Mission Center, Upscayl. Fedora's Flatpak remotes - and
   anything already installed from them - are removed on first boot, from both
   the system and per-user installations.
+
+## First-boot setup
+
+KDE's Plasma Setup runs before the login screen on a new install, the first
+time a machine boots after rebasing onto AlmanacOS, and after any upgrade that
+bumps [`flow-version`](system_files/usr/share/almanac/setup/flow-version).
+After KDE's own pages, AlmanacOS adds two:
+
+- **Recommended Apps** - Flatpaks and Homebrew formulae to install. Edit the list
+  in [`catalog.js`](system_files/usr/share/plasma/packages/org.almanacos.setup.apps/contents/ui/catalog.js);
+  while it is empty the page is hidden.
+- **Local AI** - Lemonade or ramalama, and whether to point the chosen apps,
+  and anything that reads `OPENAI_BASE_URL`, at it.
+
+The wizard only writes down your choices. Once you click Finish, Flatpaks install
+system-wide in the background once the machine is online. Homebrew formulae and
+the app hookup are applied at each user's next login. An app gets hooked up by
+an executable at `/usr/libexec/almanac-setup-hooks/<app-id>`, if there is one.
+`ujust almanac-rerun-setup` brings the wizard back at next boot. The details are
+in the header of [`almanac-setup`](system_files/usr/libexec/almanac-setup).
 
 ## Running a model
 
@@ -105,30 +125,6 @@ The developer and AI tooling is adapted from
 [Bluefin](https://projectbluefin.io), Apache-2.0 like AlmanacOS; the files that
 carry ported code cite the upstream path and commit in their headers.
 
-## Sandboxing untrusted code
-
-`msb` runs code in a hardware-virtualised microVM, not a container - separate
-kernel, so container escape is not the threat model. Useful for anything a model
-wrote and you have not read.
-
-```bash
-msb run python -- python3 -c "print('hello from a microVM')"
-
-msb create --name app python      # a persistent one
-msb exec app -- python -c "import this"
-msb stop app && msb rm app
-```
-
-`almanac-sandbox-exec` wraps this for agents: point a coding agent's shell hook
-at it and the code it writes runs in a microVM instead of your session. The
-sandbox is ephemeral and your working directory is not mounted, which is the
-point rather than an oversight.
-
-It ships as a pinned prebuilt bundle rather than an RPM, installed beside its own
-forked `libkrunfw` so that fork can never shadow a packaged one.
-[`build_files/microsandbox.sh`](build_files/microsandbox.sh) explains why, and is
-worth reading before changing any of it.
-
 ## Importing models with no network
 
 The fetching half (`amf`) runs on a networked machine and writes signed bundles
@@ -164,11 +160,8 @@ guard rail against the OOM killer. Reasoning in the header of
 ## Building it yourself
 
 `just build` builds the image, `just build-iso` the live ISO, `just check` lints
-the build context. `just verify-microsandbox` checks the pin still matches the
-release, and `just bump-microsandbox <version>` only writes a new digest after
-`gh release verify-asset` passes - neither trusts a download. This started from
-the Universal Blue `image-template`, whose instructions are at
-[docs/ublue/README.md](docs/ublue/README.md).
+the build context. This started from the Universal Blue `image-template`, whose
+instructions are at [docs/ublue/README.md](docs/ublue/README.md).
 
 ## Roadmap
 
@@ -181,11 +174,6 @@ things.
 `policy.json`. Deferred rather than forgotten - a policy that rejects the base
 image breaks `bootc upgrade` on every machine already carrying that policy, and
 recovering means a rollback. Pending a dedicated test machine.
-
-**An agent layer on top of `msb`.** The bespoke `almanac-agent` sandbox image was
-removed in 7097881 - a second image, a second CI pipeline and ~3,000 lines, for
-isolation `msb` already provides. Whatever replaces it should drive stock
-microsandbox.
 
 **A headless image.** All of the above without the desktop, for servers and for
 machines that have no business running KDE.

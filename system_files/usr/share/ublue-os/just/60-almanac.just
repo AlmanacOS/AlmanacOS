@@ -1,8 +1,8 @@
-# AlmanacOS — memory tuning and offline model import
+# AlmanacOS — memory tuning, offline model import, and the setup wizard
 #
 # Installs to /usr/share/ublue-os/just/60-almanac.just
-# Logic lives in /usr/libexec/almanac-memory and /usr/libexec/almanac-models so
-# it can be tested outside the image.
+# Logic lives in /usr/libexec/almanac-memory, /usr/libexec/almanac-models and
+# /usr/libexec/almanac-setup so it can be tested outside the image.
 
 # Show GPU topology and the current TTM system-memory cap
 [group('Almanac')]
@@ -38,3 +38,8 @@ almanac-import-models drive="":
 [group('Almanac')]
 almanac-trust-model-key keyfile:
     @/usr/libexec/almanac-models trust-key "{{ keyfile }}"
+
+# Run the setup wizard again at next boot (apps, model server)
+[group('Almanac')]
+almanac-rerun-setup:
+    @/usr/libexec/almanac-setup rerun

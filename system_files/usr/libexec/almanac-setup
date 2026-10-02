@@ -1,0 +1,259 @@
+#!/usr/bin/bash
+# almanac-setup — decide when KDE's setup wizard runs, and act on what it chose.
+#
+# The wizard is Plasma Setup (KDE Initial System Setup, /usr/libexec/plasma-setup)
+# with two AlmanacOS pages added as KPackages under
+# /usr/share/plasma/packages/org.almanacos.setup.*. Those pages run as the
+# unprivileged plasma-setup user, usually before there is a network, so they
+# cannot install anything. They write choices.ini and this script does the rest.
+#
+# When the wizard runs
+#   Upstream runs it whenever /etc/plasma-setup-done is missing. That covers a
+#   new install, but not a rebase from another image — which will have finished
+#   its own setup — and not an upgrade that changes our pages. So `gate` runs at
+#   boot before plasma-setup.service and removes the flag whenever the flow
+#   version shipped in /usr/share/almanac/setup/flow-version differs from the
+#   one this machine last completed. Bump that file to run the wizard again on
+#   every machine that upgrades to the image; don't bump it for changes that
+#   nobody needs to see.
+#
+#   Re-running on a machine that already has users skips account creation —
+#   upstream checks for existing users — but language, keyboard and time zone
+#   are shown again, because those pages have no notion of "already set".
+#
+# choices.ini (/var/lib/almanac-setup/choices/, owned by plasma-setup)
+#   [apps]  selected, flatpaks, brews, aiIds  space-separated IDs
+#           aiNames                            display only
+#   [ai]    backend = lemonade | ramalama
+#           hookup  = true | false
+#   [meta]  revision                           changes on every write
+#
+#   The file is written by an unprivileged user and read here as root, so every
+#   value is checked against a pattern before use, and nothing in it is ever
+#   executed: per-app hooks are looked up by ID in a root-owned directory.
+#
+# What gets applied
+#   apply-system (root, once the wizard has finished, retried until online)
+#     - installs the chosen Flatpaks system-wide from Flathub
+#     - enables lemond for Lemonade, disables it for ramalama
+#   apply-user (each human user, at their next login)
+#     - if hookup is on: `almanac-ai backend <server>`, then
+#       /usr/libexec/almanac-setup-hooks/<id> <server> <url> for each chosen
+#       AI-capable app that has one
+#     - installs the chosen Homebrew formulae
+#   Each records the revision it applied and does nothing until it changes.
+
+set -euo pipefail
+
+readonly FLOW_FILE=/usr/share/almanac/setup/flow-version
+readonly STATE_DIR=/var/lib/almanac-setup
+readonly CHOICES="${STATE_DIR}/choices/choices.ini"
+readonly DONE_FLAG=/etc/plasma-setup-done
+readonly HOOK_DIR=/usr/libexec/almanac-setup-hooks
+readonly BACKEND_CONF=/etc/almanac/ai-backend
+
+# Same endpoints as /usr/libexec/almanac-ai.
+readonly LEMONADE_URL="http://localhost:13305/v1"
+readonly RAMALAMA_URL="http://localhost:8080/v1"
+
+readonly ID_RE='^[A-Za-z0-9][A-Za-z0-9._+@-]*$'
+
+die() { printf 'almanac-setup: %s\n' "$*" >&2; exit 1; }
+log() { printf 'almanac-setup: %s\n' "$*"; }
+
+priv() {
+    if [[ $EUID -eq 0 ]]; then
+        "$@"
+    elif command -v run0 >/dev/null 2>&1; then
+        run0 "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    else
+        die "need root, and neither run0 nor sudo is available"
+    fi
+}
+
+read_file() { [[ -r "$1" ]] && tr -d '[:space:]' < "$1" || true; }
+
+# ini_get SECTION KEY — the value from choices.ini, without QSettings' quotes.
+ini_get() {
+    [[ -r "$CHOICES" ]] || return 0
+    awk -v section="[$1]" -v key="$2" '
+        $0 == section { found = 1; next }
+        /^\[/         { found = 0 }
+        found && index($0, key "=") == 1 {
+            value = substr($0, length(key) + 2)
+            gsub(/^"|"$/, "", value)
+            print value
+            exit
+        }
+    ' "$CHOICES"
+}
+
+# ids SECTION KEY — the space-separated list, dropping anything malformed.
+ids() {
+    local id list
+    read -ra list <<< "$(ini_get "$1" "$2")"
+    for id in "${list[@]}"; do
+        if [[ "$id" =~ $ID_RE ]]; then
+            printf '%s\n' "$id"
+        else
+            log "ignoring malformed ID in [$1] $2: ${id}" >&2
+        fi
+    done
+}
+
+backend() {
+    case "$(ini_get ai backend)" in
+        ramalama) printf 'ramalama' ;;
+        *)        printf 'lemonade' ;;
+    esac
+}
+
+backend_url() {
+    case "$1" in
+        ramalama) printf '%s' "$RAMALAMA_URL" ;;
+        *)        printf '%s' "$LEMONADE_URL" ;;
+    esac
+}
+
+# --- gate --------------------------------------------------------------------
+
+# Runs before plasma-setup.service. `pending` records which flow version we
+# asked the wizard to run for, so a wizard that finished on a boot where
+# apply-system never got to record it is still counted as done.
+cmd_gate() {
+    local current completed pending
+    current=$(read_file "$FLOW_FILE")
+    [[ -n "$current" ]] || die "${FLOW_FILE} is missing or empty"
+    completed=$(read_file "${STATE_DIR}/completed-version")
+    pending=$(read_file "${STATE_DIR}/pending-version")
+
+    [[ "$completed" == "$current" ]] && return 0
+
+    install -d -m 0755 "$STATE_DIR"
+    if [[ -e "$DONE_FLAG" && "$pending" == "$current" ]]; then
+        printf '%s\n' "$current" > "${STATE_DIR}/completed-version"
+        rm -f "${STATE_DIR}/pending-version"
+        return 0
+    fi
+
+    log "setup flow ${current} not completed here (last: ${completed:-none}); running the wizard"
+    rm -f "$DONE_FLAG"
+    printf '%s\n' "$current" > "${STATE_DIR}/pending-version"
+}
+
+# --- apply-system ------------------------------------------------------------
+
+cmd_apply_system() {
+    [[ $EUID -eq 0 ]] || die "apply-system must run as root"
+    [[ -e "$DONE_FLAG" ]] || return 0
+
+    # The gate only lets the flag survive boot when the current flow is done,
+    # and the wizard only creates it on Finish — either way, this flow is done.
+    install -d -m 0755 "$STATE_DIR"
+    printf '%s\n' "$(read_file "$FLOW_FILE")" > "${STATE_DIR}/completed-version"
+    rm -f "${STATE_DIR}/pending-version"
+
+    [[ -r "$CHOICES" ]] || return 0
+    local revision; revision=$(ini_get meta revision)
+    [[ "$revision" != "$(read_file "${STATE_DIR}/applied-revision")" ]] || return 0
+
+    local which; which=$(backend)
+    install -d -m 0755 "$(dirname "$BACKEND_CONF")"
+    printf 'ALMANAC_AI_BACKEND=%s\n' "$which" > "$BACKEND_CONF"
+    if [[ "$which" == lemonade ]]; then
+        systemctl enable --now --no-block lemond.service
+    else
+        systemctl disable --now --no-block lemond.service
+    fi
+
+    local -a flatpaks
+    mapfile -t flatpaks < <(ids apps flatpaks)
+    if [[ ${#flatpaks[@]} -gt 0 ]]; then
+        log "installing Flatpaks: ${flatpaks[*]}"
+        # Fails offline; the unit retries, and the next boot tries again.
+        flatpak install --system --noninteractive --or-update -y flathub "${flatpaks[@]}"
+    fi
+
+    printf '%s\n' "$revision" > "${STATE_DIR}/applied-revision"
+}
+
+# --- apply-user --------------------------------------------------------------
+
+brew_bin() {
+    if command -v brew >/dev/null 2>&1; then
+        command -v brew
+    elif [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+        printf '/home/linuxbrew/.linuxbrew/bin/brew'
+    fi
+}
+
+cmd_apply_user() {
+    [[ $EUID -ne 0 ]] || die "apply-user runs as the user it applies to"
+    [[ -e "$DONE_FLAG" && -r "$CHOICES" ]] || return 0
+
+    local state="${XDG_STATE_HOME:-${HOME}/.local/state}/almanac"
+    local revision; revision=$(ini_get meta revision)
+    [[ "$revision" != "$(read_file "${state}/setup-applied-revision")" ]] || return 0
+
+    # Hookup first: it works offline, and a Homebrew failure below leaves the
+    # revision unrecorded, so all of this runs again at next login. Hooks must
+    # therefore be safe to repeat.
+    if [[ "$(ini_get ai hookup)" == true ]]; then
+        local which url id
+        which=$(backend)
+        url=$(backend_url "$which")
+        /usr/libexec/almanac-ai backend "$which"
+        while read -r id; do
+            [[ -x "${HOOK_DIR}/${id}" ]] || continue
+            log "connecting ${id} to ${which}"
+            "${HOOK_DIR}/${id}" "$which" "$url" || log "hook for ${id} failed" >&2
+        done < <(ids apps aiIds)
+    fi
+
+    local -a brews
+    mapfile -t brews < <(ids apps brews)
+    if [[ ${#brews[@]} -gt 0 ]]; then
+        local brew; brew=$(brew_bin)
+        # Homebrew unpacks on first boot, possibly after this login; retry next time.
+        [[ -n "$brew" ]] || die "Homebrew is not installed yet; will retry at next login"
+        log "installing Homebrew formulae: ${brews[*]}"
+        "$brew" install "${brews[@]}"
+    fi
+
+    install -d "$state"
+    printf '%s\n' "$revision" > "${state}/setup-applied-revision"
+}
+
+# --- rerun -------------------------------------------------------------------
+
+cmd_rerun() {
+    priv rm -f "${STATE_DIR}/completed-version" "${STATE_DIR}/pending-version"
+    log "the setup wizard will run at next boot"
+}
+
+usage() {
+    cat <<'EOF'
+Usage: almanac-setup <command>
+
+  gate           At boot: clear /etc/plasma-setup-done if this setup flow
+                 version has not been completed, so the wizard runs.
+  apply-system   As root: install chosen Flatpaks, configure the model server.
+  apply-user     As a user: install chosen Homebrew formulae, connect apps.
+  rerun          Run the wizard again at next boot.
+EOF
+}
+
+main() {
+    case "${1:-}" in
+        gate)         cmd_gate ;;
+        apply-system) cmd_apply_system ;;
+        apply-user)   cmd_apply_user ;;
+        rerun)        cmd_rerun ;;
+        -h|--help)    usage ;;
+        *)            usage >&2; exit 1 ;;
+    esac
+}
+
+main "$@"

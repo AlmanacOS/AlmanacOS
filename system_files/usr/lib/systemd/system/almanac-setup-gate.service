@@ -1,0 +1,18 @@
+[Unit]
+Description=Decide whether the AlmanacOS setup wizard runs this boot
+Documentation=file:///usr/libexec/almanac-setup
+# Must finish before anything looks at /etc/plasma-setup-done: plasma-setup's
+# own ConditionPathExists, and the path unit that applies the wizard's choices.
+# Path units come up with sysinit.target, hence the early ordering.
+DefaultDependencies=no
+After=local-fs.target
+Before=sysinit.target almanac-setup-apply.path plasma-setup.service
+ConditionPathExists=/usr/share/almanac/setup/flow-version
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/almanac-setup gate
+RemainAfterExit=true
+
+[Install]
+WantedBy=sysinit.target

@@ -1,0 +1,13 @@
+[Unit]
+Description=Apply AlmanacOS setup choices once the wizard has finished
+Documentation=file:///usr/libexec/almanac-setup
+After=almanac-setup-gate.service
+
+[Path]
+# Created by plasma-setup when the user clicks Finish. Also true at every
+# later boot; the service exits at once when there is nothing new to apply.
+PathExists=/etc/plasma-setup-done
+Unit=almanac-setup-apply.service
+
+[Install]
+WantedBy=paths.target
