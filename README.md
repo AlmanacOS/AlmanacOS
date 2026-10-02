@@ -35,6 +35,11 @@ including the part where it says nobody has booted one yet.
 ## What's in it
 
 - **Lemonade** (`lemond`, enabled at boot) and **ramalama**, for serving models.
+  ramalama's containers run under `krun`, each in its own libkrun microVM, as
+  if `--oci-runtime krun` were always passed. Podman's own default is left
+  alone, so distrobox and toolbox are unaffected. `--oci-runtime crun` opts
+  out for one run; details in
+  [`almanac-ramalama`](system_files/usr/libexec/almanac-ramalama).
 - **A setup wizard** (KDE's Plasma Setup) with AlmanacOS pages for choosing
   apps and a model server. See [First-boot setup](#first-boot-setup).
 - **`ujust almanac-*`** recipes for offline model import and APU memory tuning.

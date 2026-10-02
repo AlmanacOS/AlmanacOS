@@ -1,0 +1,30 @@
+#!/usr/bin/bash
+# almanac-ramalama — /usr/bin/ramalama, running ramalama's containers under krun.
+#
+# The effect is `ramalama serve --oci-runtime krun` (and run, bench, …) without
+# typing the flag. ramalama has no ramalama.conf key or environment variable
+# for the OCI runtime, and making krun Podman's default would move every
+# container to it, distrobox and toolbox included. So this wrapper hands
+# ramalama a Podman override that only ramalama's own podman calls ever see.
+#
+# build.sh moves the RPM's entry point to /usr/libexec/ramalama/ramalama and
+# links /usr/bin/ramalama here.
+#
+# To get the default runtime back:
+#   one run         ramalama serve --oci-runtime crun …   (podman's --runtime
+#                   beats the config file)
+#   always, per user  ALMANAC_RAMALAMA_KRUN=0 in ~/.config/environment.d/
+# If CONTAINERS_CONF_OVERRIDE is already set, it is respected and krun is not
+# applied — there is only one override slot.
+#
+# Not covered: units written by `ramalama serve --generate=quadlet|kube` run
+# under systemd later, without this wrapper, so they use Podman's default.
+
+readonly REAL=/usr/libexec/ramalama/ramalama
+readonly OVERRIDE=/usr/share/almanac/ramalama/containers-krun.conf
+
+if [[ -z "${CONTAINERS_CONF_OVERRIDE:-}" && "${ALMANAC_RAMALAMA_KRUN:-1}" != 0 ]]; then
+    export CONTAINERS_CONF_OVERRIDE="$OVERRIDE"
+fi
+
+exec "$REAL" "$@"

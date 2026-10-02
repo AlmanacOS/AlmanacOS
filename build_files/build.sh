@@ -20,6 +20,15 @@ cp -avf "/ctx/system_files"/. /
 # /usr/bin on PATH, so a brew copy would silently shadow this one.
 dnf5 -y install ramalama
 
+# ramalama's containers run under krun (libkrun microVMs) by default, without
+# touching Podman's global runtime — see /usr/libexec/almanac-ramalama. The RPM
+# owns /usr/bin/ramalama and would overwrite anything system_files put there,
+# so the swap happens after the install. Keeping the basename "ramalama" keeps
+# its --help output unchanged.
+install -d /usr/libexec/ramalama
+mv /usr/bin/ramalama /usr/libexec/ramalama/ramalama
+ln -s /usr/libexec/almanac-ramalama /usr/bin/ramalama
+
 # add lemonade via copr:
 dnf5 -y copr enable clemperorpenguin/lemonade
 dnf5 -y install lemonade
@@ -106,6 +115,7 @@ chmod +x /usr/libexec/almanac-flatpak-nuke-fedora
 chmod +x /usr/libexec/almanac-devmode
 chmod +x /usr/libexec/almanac-ai
 chmod +x /usr/libexec/almanac-setup
+chmod +x /usr/libexec/almanac-ramalama
 chmod +x /usr/libexec/almanac-setup-hooks/*
 
 # The ujust manifest is the only thing that makes any almanac recipe reachable:
