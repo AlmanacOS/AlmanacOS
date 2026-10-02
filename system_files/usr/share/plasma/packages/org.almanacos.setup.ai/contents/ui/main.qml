@@ -1,12 +1,11 @@
-// AlmanacOS setup wizard — pick the local model server, and whether apps are
-// pointed at it.
+// AlmanacOS setup wizard — pick the local model server.
 //
-// Like the apps page, this only records the choice in choices.ini;
-// /usr/libexec/almanac-setup acts on it after the wizard finishes. The server
-// choice is system-wide (Lemonade's service is left on or turned off). The
-// hookup is per user: at each user's next login it runs
-// `almanac-ai backend <server>` and the hook for every AI-capable app ticked on
-// the previous page.
+// Comes before the apps page, which names the server on each app's "use for AI
+// features" switch. Like that page, this only records the choice in
+// choices.ini; /usr/libexec/almanac-setup acts on it after the wizard
+// finishes. The server is system-wide (Lemonade's service is left on or turned
+// off). The command-line switch is applied per user at their next login, as
+// `almanac-ai backend <server>`.
 
 pragma ComponentBehavior: Bound
 
@@ -26,12 +25,7 @@ PlasmaSetupComponents.SetupModule {
     nextEnabled: true
 
     property string backend: "lemonade"
-    property bool hookup: true
-
-    /**
-    * Names of the AI-capable apps ticked on the Recommended Apps page.
-    */
-    property string aiNames: ""
+    property bool cli: true
 
     readonly property string backendName: backend === "ramalama" ? "ramalama" : "Lemonade"
 
@@ -42,24 +36,16 @@ PlasmaSetupComponents.SetupModule {
 
     function save(): void {
         choices.setValue("ai/backend", root.backend);
-        choices.setValue("ai/hookup", root.hookup);
+        choices.setValue("ai/cli", root.cli);
         choices.setValue("meta/revision", String(Date.now()));
         choices.sync();
-    }
-
-    // The apps page writes the same file from another Settings object, so
-    // re-read it each time this page comes into view.
-    function onPageActivated(): void {
-        choices.sync();
-        root.aiNames = String(choices.value("apps/aiNames", ""));
     }
 
     Component.onCompleted: {
         const backend = String(choices.value("ai/backend", "lemonade"));
         root.backend = backend === "ramalama" ? "ramalama" : "lemonade";
         // QSettings hands an INI boolean back as the string "true"/"false".
-        root.hookup = String(choices.value("ai/hookup", true)) === "true";
-        root.onPageActivated();
+        root.cli = String(choices.value("ai/cli", true)) === "true";
         save();
     }
 
@@ -77,7 +63,7 @@ PlasmaSetupComponents.SetupModule {
                 Layout.alignment: Qt.AlignHCenter
                 wrapMode: Text.Wrap
                 horizontalAlignment: Text.AlignHCenter
-                text: i18nc("@info", "AlmanacOS runs language models on this device. Choose which server provides them.")
+                text: i18nc("@info", "AlmanacOS runs language models on this device. Choose which server provides them. On the next page you can connect apps to it.")
             }
 
             FormCard.FormCard {
@@ -116,13 +102,11 @@ PlasmaSetupComponents.SetupModule {
                 Layout.alignment: Qt.AlignHCenter
 
                 FormCard.FormSwitchDelegate {
-                    text: i18nc("@option:check %1 is Lemonade or ramalama", "Connect apps to %1 automatically", root.backendName)
-                    description: root.aiNames.length > 0
-                        ? i18nc("@info %1 is a list of app names", "Applies to %1, and to command-line tools that use the OpenAI API.", root.aiNames)
-                        : i18nc("@info", "Applies to command-line tools that use the OpenAI API.")
-                    checked: root.hookup
+                    text: i18nc("@option:check %1 is Lemonade or ramalama", "Point command-line tools at %1", root.backendName)
+                    description: i18nc("@info", "Sets OPENAI_BASE_URL, plus config for aichat and llm.")
+                    checked: root.cli
                     onToggled: {
-                        root.hookup = checked;
+                        root.cli = checked;
                         root.save();
                     }
                 }

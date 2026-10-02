@@ -69,6 +69,11 @@ fi
 # rebase onto this image, and on upgrades that bump
 # /usr/share/almanac/setup/flow-version. See /usr/libexec/almanac-setup.
 dnf5 -y install plasma-setup
+
+# Firefox is always present, as Fedora's RPM, because the wizard's app page
+# offers to point its AI sidebar at the local model server and has no install
+# checkbox for it. Usually already in the base; this makes it a guarantee.
+dnf5 -y install firefox
 systemctl enable plasma-setup.service
 systemctl enable almanac-setup-gate.service
 systemctl enable almanac-setup-apply.path
@@ -101,6 +106,7 @@ chmod +x /usr/libexec/almanac-flatpak-nuke-fedora
 chmod +x /usr/libexec/almanac-devmode
 chmod +x /usr/libexec/almanac-ai
 chmod +x /usr/libexec/almanac-setup
+chmod +x /usr/libexec/almanac-setup-hooks/*
 
 # The ujust manifest is the only thing that makes any almanac recipe reachable:
 # ublue-os-just bakes a fixed import list into /usr/share/ublue-os/justfile and

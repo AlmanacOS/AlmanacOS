@@ -1,0 +1,47 @@
+#!/usr/bin/bash
+# almanac-setup hook: Firefox's AI chatbot sidebar → the local model server.
+#
+# Called as: firefox system|user <server> <api-url>   (see almanac-setup)
+#
+# Firefox is the Fedora RPM, which reads enterprise policies system-wide from
+# /etc/firefox/policies/policies.json, so this is all done in the system half.
+# Fedora ships no policies.json of its own; if an admin has written one, the
+# two keys below are merged in and everything else is left alone.
+#
+# The sidebar shows a web page, not the API: it gets the server's chat UI at
+# the root of the same port (Lemonade's web app, or llama.cpp's under
+# `ramalama serve`), not the /v1 base the other hooks use.
+#
+#   AIChatbot     adds the server as a provider and makes it the default
+#                 (policy since Firefox 149; Default takes the provider's name)
+#   Preferences   turns the sidebar on, as a default the user can change
+
+set -euo pipefail
+
+readonly POLICIES=/etc/firefox/policies/policies.json
+
+[[ "${1:-}" == system ]] || exit 0
+server="$2"
+url="${3%/v1}/"
+
+case "$server" in
+    ramalama) name="ramalama (this device)" ;;
+    *)        name="Lemonade (this device)" ;;
+esac
+
+install -d -m 0755 "$(dirname "$POLICIES")"
+current='{}'
+[[ -s "$POLICIES" ]] && current=$(cat "$POLICIES")
+
+tmp=$(mktemp "${POLICIES}.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+jq --arg url "$url" --arg name "$name" '
+    .policies.AIChatbot.Providers.Add =
+        ([.policies.AIChatbot.Providers.Add // [] | .[] | select(.id != "almanac-local")]
+         + [{id: "almanac-local", name: $name, url: $url}])
+    | .policies.AIChatbot.Providers.Default = $name
+    | .policies.Preferences["browser.ml.chat.enabled"] = {Value: true, Status: "default"}
+' <<< "$current" > "$tmp"
+chmod 0644 "$tmp"
+mv "$tmp" "$POLICIES"
+trap - EXIT

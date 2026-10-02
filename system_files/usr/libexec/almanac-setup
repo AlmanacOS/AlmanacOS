@@ -22,11 +22,12 @@
 #   are shown again, because those pages have no notion of "already set".
 #
 # choices.ini (/var/lib/almanac-setup/choices/, owned by plasma-setup)
-#   [apps]  selected, flatpaks, brews, aiIds  space-separated IDs
-#           aiNames                            display only
+#   [apps]  flatpaks, brews   space-separated IDs to install
+#           aiIds             space-separated IDs to connect to the server
+#           selected, hooked  the raw checkbox state, for the wizard's re-runs
 #   [ai]    backend = lemonade | ramalama
-#           hookup  = true | false
-#   [meta]  revision                           changes on every write
+#           cli     = true | false   point command-line tools at it too
+#   [meta]  revision                 changes on every write
 #
 #   The file is written by an unprivileged user and read here as root, so every
 #   value is checked against a pattern before use, and nothing in it is ever
@@ -34,14 +35,24 @@
 #
 # What gets applied
 #   apply-system (root, once the wizard has finished, retried until online)
-#     - installs the chosen Flatpaks system-wide from Flathub
+#     - installs or updates Bazaar, and refreshes Flathub's AppStream data so
+#       Bazaar has a catalogue to show
 #     - enables lemond for Lemonade, disables it for ramalama
+#     - installs the chosen Flatpaks system-wide from Flathub
+#     - runs the system half of each chosen app's hook
 #   apply-user (each human user, at their next login)
-#     - if hookup is on: `almanac-ai backend <server>`, then
-#       /usr/libexec/almanac-setup-hooks/<id> <server> <url> for each chosen
-#       AI-capable app that has one
+#     - if cli is on: `almanac-ai backend <server>`
+#     - runs the user half of each chosen app's hook
 #     - installs the chosen Homebrew formulae
 #   Each records the revision it applied and does nothing until it changes.
+#
+# Hooks
+#   /usr/libexec/almanac-setup-hooks/<id> system|user <server> <api-url>
+#   is run twice per hooked app: as root by apply-system, then as each user by
+#   apply-user. <api-url> is the OpenAI-compatible base, ending in /v1. A hook
+#   ignores the half it has no use for, and must be safe to run again — a
+#   failed Homebrew install means apply-user runs everything again next login.
+#   Hooks only fill in settings the app already has; none installs a plugin.
 
 set -euo pipefail
 
@@ -143,6 +154,17 @@ cmd_gate() {
     printf '%s\n' "$current" > "${STATE_DIR}/pending-version"
 }
 
+# run_hooks PHASE SERVER — one app's failure does not stop the others.
+run_hooks() {
+    local phase="$1" which="$2" url id
+    url=$(backend_url "$which")
+    while read -r id; do
+        [[ -x "${HOOK_DIR}/${id}" ]] || continue
+        log "connecting ${id} to ${which} (${phase})"
+        "${HOOK_DIR}/${id}" "$phase" "$which" "$url" || log "${phase} hook for ${id} failed" >&2
+    done < <(ids apps aiIds)
+}
+
 # --- apply-system ------------------------------------------------------------
 
 cmd_apply_system() {
@@ -158,6 +180,12 @@ cmd_apply_system() {
     [[ -r "$CHOICES" ]] || return 0
     local revision; revision=$(ini_get meta revision)
     [[ "$revision" != "$(read_file "${STATE_DIR}/applied-revision")" ]] || return 0
+
+    # Bazaar is preinstalled, but flatpak-preinstall never updates it, and on a
+    # first boot the AppStream data it browses may not have been fetched yet.
+    log "installing or updating Bazaar, and refreshing Flathub's AppStream data"
+    flatpak install --system --noninteractive --or-update -y flathub io.github.kolunmi.Bazaar
+    flatpak update --system --appstream flathub
 
     local which; which=$(backend)
     install -d -m 0755 "$(dirname "$BACKEND_CONF")"
@@ -175,6 +203,8 @@ cmd_apply_system() {
         # Fails offline; the unit retries, and the next boot tries again.
         flatpak install --system --noninteractive --or-update -y flathub "${flatpaks[@]}"
     fi
+
+    run_hooks system "$which"
 
     printf '%s\n' "$revision" > "${STATE_DIR}/applied-revision"
 }
@@ -198,19 +228,12 @@ cmd_apply_user() {
     [[ "$revision" != "$(read_file "${state}/setup-applied-revision")" ]] || return 0
 
     # Hookup first: it works offline, and a Homebrew failure below leaves the
-    # revision unrecorded, so all of this runs again at next login. Hooks must
-    # therefore be safe to repeat.
-    if [[ "$(ini_get ai hookup)" == true ]]; then
-        local which url id
-        which=$(backend)
-        url=$(backend_url "$which")
+    # revision unrecorded, so all of this runs again at next login.
+    local which; which=$(backend)
+    if [[ "$(ini_get ai cli)" == true ]]; then
         /usr/libexec/almanac-ai backend "$which"
-        while read -r id; do
-            [[ -x "${HOOK_DIR}/${id}" ]] || continue
-            log "connecting ${id} to ${which}"
-            "${HOOK_DIR}/${id}" "$which" "$url" || log "hook for ${id} failed" >&2
-        done < <(ids apps aiIds)
     fi
+    run_hooks user "$which"
 
     local -a brews
     mapfile -t brews < <(ids apps brews)
@@ -239,8 +262,10 @@ Usage: almanac-setup <command>
 
   gate           At boot: clear /etc/plasma-setup-done if this setup flow
                  version has not been completed, so the wizard runs.
-  apply-system   As root: install chosen Flatpaks, configure the model server.
-  apply-user     As a user: install chosen Homebrew formulae, connect apps.
+  apply-system   As root: update Bazaar and AppStream, configure the model
+                 server, install chosen Flatpaks, run system hooks.
+  apply-user     As a user: point CLI tools at the server, run user hooks,
+                 install chosen Homebrew formulae.
   rerun          Run the wizard again at next boot.
 EOF
 }

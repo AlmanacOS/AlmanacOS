@@ -1,0 +1,39 @@
+#!/usr/bin/bash
+# almanac-setup hook: DBeaver Community's AI assistant → the local model server.
+#
+# Called as: io.dbeaver.DBeaverCommunity system|user <server> <api-url>
+#
+# Community Edition has no Ollama engine, but its OpenAI engine takes a custom
+# base URL, which is all an OpenAI-compatible server needs. Settings live in
+# ai-configuration.json in the workspace's .metadata directory
+# (AISettingsManager, BaseWorkspaceImpl.getWorkspaceConfigFolder).
+#
+# Written only when DBeaver has no AI configuration yet. Its format has
+# changed between releases, and this is written in the older single-engine
+# form that DBeaver still migrates on load (see
+# AISettingsManagerTest.migratesLegacyDefaultEngineAndOpenAIModel) rather
+# than the current one. An existing file is never touched, so a user who has
+# already set up AI keeps their setup.
+#
+# The engine refuses to run without a token; local servers ignore it, so any
+# non-empty value does. No model is written — the server's list is in no
+# useful order — so DBeaver's migration fills in its old default (gpt-4o),
+# which the user replaces from the model list in DBeaver's AI settings.
+
+set -euo pipefail
+
+readonly WORKSPACE="${HOME}/.var/app/io.dbeaver.DBeaverCommunity/data/DBeaverData/workspace6"
+readonly CONFIG="${WORKSPACE}/.metadata/ai-configuration.json"
+
+[[ "${1:-}" == user ]] || exit 0
+url="$3"
+
+[[ -e "$CONFIG" || -e "${WORKSPACE}/ai-configuration.json" ]] && exit 0
+
+install -d "$(dirname "$CONFIG")"
+jq -n --arg url "${url}/" '{
+    activeEngine: "openai",
+    engineConfigurations: {
+        openai: {properties: {"gpt.base_url": $url, "gpt.token": "local"}}
+    }
+}' > "$CONFIG"

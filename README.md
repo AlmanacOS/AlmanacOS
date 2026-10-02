@@ -57,16 +57,28 @@ time a machine boots after rebasing onto AlmanacOS, and after any upgrade that
 bumps [`flow-version`](system_files/usr/share/almanac/setup/flow-version).
 After KDE's own pages, AlmanacOS adds two:
 
-- **Recommended Apps** - Flatpaks and Homebrew formulae to install. Edit the list
-  in [`catalog.js`](system_files/usr/share/plasma/packages/org.almanacos.setup.apps/contents/ui/catalog.js);
-  while it is empty the page is hidden.
-- **Local AI** - Lemonade or ramalama, and whether to point the chosen apps,
-  and anything that reads `OPENAI_BASE_URL`, at it.
+- **Local AI** - Lemonade or ramalama, and whether to point command-line tools
+  that read `OPENAI_BASE_URL` at it.
+- **Apps** - optional installs, each with a switch to connect it to that server
+  where the app has a built-in setting for one:
 
-The wizard only writes down your choices. Once you click Finish, Flatpaks install
-system-wide in the background once the machine is online. Homebrew formulae and
-the app hookup are applied at each user's next login. An app gets hooked up by
-an executable at `/usr/libexec/almanac-setup-hooks/<app-id>`, if there is one.
+  | App | Hooked up | |
+  |---|---|---|
+  | Firefox | yes | always installed (Fedora RPM); AI chatbot sidebar, via `/etc/firefox/policies` |
+  | Calibre | yes | "Discuss with AI", OpenAI-compatible provider |
+  | DBeaver Community | yes | AI assistant, OpenAI engine with a custom URL; only if not already configured |
+  | Trilium Notes | no | built-in AI, but its settings live in the notes database - set it by hand |
+  | ONLYOFFICE, Joplin | no | AI needs a plugin |
+  | Crow Translate, Speech Note | no | no language-model setting |
+
+  The list is in [`catalog.js`](system_files/usr/share/plasma/packages/org.almanacos.setup.apps/contents/ui/catalog.js).
+
+The wizard only writes down your choices. Once you click Finish and the machine
+is online, Bazaar is installed or updated, Flathub's AppStream data is
+refreshed, and the chosen Flatpaks install system-wide. Homebrew formulae and
+per-user app settings are applied at each user's next login. Each app's hookup
+is an executable in
+[`/usr/libexec/almanac-setup-hooks/`](system_files/usr/libexec/almanac-setup-hooks).
 `ujust almanac-rerun-setup` brings the wizard back at next boot. The details are
 in the header of [`almanac-setup`](system_files/usr/libexec/almanac-setup).
 

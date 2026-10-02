@@ -1,0 +1,36 @@
+#!/usr/bin/bash
+# almanac-setup hook: Calibre's "Discuss with AI" → the local model server.
+#
+# Called as: com.calibre_ebook.calibre system|user <server> <api-url>
+#
+# Uses the "OpenAI compatible" provider built into calibre since 9.8. Its
+# settings are plain JSON (calibre.ai.prefs: JSONConfig('ai'), mode 0600),
+# which for the Flatpak lives under ~/.var/app. Merged, not replaced: other
+# providers the user has set up are kept.
+#
+# calibre treats the provider as unusable until a model is chosen, and that is
+# left to the user ("Refresh models" in the AI settings): the server's model
+# list is in no useful order, and can lead with an OCR or embedding model.
+
+set -euo pipefail
+
+readonly AI_JSON="${HOME}/.var/app/com.calibre_ebook.calibre/config/calibre/ai.json"
+readonly PROVIDER="OpenAI compatible"
+readonly PURPOSE="AICapabilities.text_to_text"
+
+[[ "${1:-}" == user ]] || exit 0
+url="$3"
+
+install -d -m 0700 "$(dirname "$AI_JSON")"
+current='{}'
+[[ -s "$AI_JSON" ]] && current=$(cat "$AI_JSON")
+
+tmp=$(mktemp "${AI_JSON}.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+jq --arg p "$PROVIDER" --arg purpose "$PURPOSE" --arg url "$url" '
+    .providers[$p].api_url = $url
+    | .purpose_map[$purpose] = $p
+' <<< "$current" > "$tmp"
+chmod 0600 "$tmp"
+mv "$tmp" "$AI_JSON"
+trap - EXIT

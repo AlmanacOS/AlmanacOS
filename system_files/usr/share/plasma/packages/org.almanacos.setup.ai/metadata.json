@@ -6,7 +6,7 @@
                 "Name": "AlmanacOS"
             }
         ],
-        "Description": "Choose the local model server, and whether apps are connected to it.",
+        "Description": "Choose the local model server.",
         "Id": "org.almanacos.setup.ai",
         "License": "Apache-2.0",
         "Name": "Local AI",
@@ -14,5 +14,5 @@
     },
     "NoDisplay": true,
     "X-KDE-ParentApp": "org.kde.plasmasetup",
-    "X-KDE-Weight": 70
+    "X-KDE-Weight": 60
 }
