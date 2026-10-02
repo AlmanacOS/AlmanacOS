@@ -36,6 +36,9 @@ dnf5 -y copr enable clemperorpenguin/AlmanacOS
 dnf5 -y install amdgpu_top almanac-model-fetch ripwire
 dnf5 -y copr disable clemperorpenguin/AlmanacOS
 
+# krun
+dnf5 -y install crun-krun
+
 # jq, for shell tooling that reads JSON.
 dnf5 install -y jq
 
