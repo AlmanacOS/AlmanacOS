@@ -1,11 +1,6 @@
 # AlmanacOS
 
-**PRE-ALPHA not for production**
-
-AlmanacOS is a bootc desktop image for running language models on hardware you
-own - including hardware that never touches a network. Fedora Kinoite
-underneath, so it is a KDE desktop that updates atomically and rolls back when
-an update goes wrong.
+**Not Responsible for Explosions, Data Loss, or Rogue Agents (or anything else)**
 
 Working offline is the constraint the rest of the design falls out of, not a
 feature bolted on the side. Models arrive on a USB drive and are checked against
