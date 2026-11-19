@@ -54,8 +54,9 @@ check:
 #
 #   2. build.sh does not see the repository. The context stage is bind-mounted
 #      at /ctx, so a file the Containerfile placed at /system_files is reachable
-#      as /ctx/system_files — and the bare path is a plausible-looking absolute
-#      path that simply is not there.
+#      as /ctx/system_files — and the bare path, though plausible-looking, is
+#      simply not there.
+#
 [group('Just')]
 check-build-context:
     #!/usr/bin/bash
